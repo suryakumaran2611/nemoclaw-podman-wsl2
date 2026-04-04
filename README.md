@@ -164,7 +164,8 @@ A single Streamlit dashboard is now the primary GUI for NemoClaw. It can perform
 - Ollama health check via the WSL HTTP path
 - Sandbox gateway start/stop and status display
 - NemoClaw service start/stop controls
-- OpenShell provider/sandbox listing
+- Automated full system health check
+- OpenShell provider and sandbox listing
 - Custom OpenShell command execution
 - Interactive chat interface that executes prompts inside the `nemoclaw` sandbox
 - Hardware monitor with `nvidia-smi` metrics when available
@@ -194,9 +195,118 @@ http://127.0.0.1:8501
 
 - The dashboard runs inside WSL and uses `DOCKER_HOST=unix:///var/run/docker.sock` for every command.
 - Make sure the Podman rootful socket is bridged before launching Streamlit.
-- The dashboard replaces the older `web-gui/` browser interface.
+- Streamlit is configured to run headless (no auto-browser opening) to avoid WSL browser issues.
+- Telemetry and email prompts are disabled via `.streamlit/config.toml`.
+- The sidebar includes a Quick Start checklist with clickable buttons for setup, gateway service startup, and health checks.
 
-## Final Thermal Warning (MSI Vector)
+### Troubleshooting
+
+- **"Connection refused" errors**: Ensure Podman Machine is running and rootful mode is enabled.
+- **Ollama health check fails**: Verify Windows Ollama is running and firewall allows port 11434.
+- **Browser won't open**: Streamlit runs headless in WSL - always open `http://127.0.0.1:8501` from Windows browser.
+- **Streamlit email prompt**: The config disables this.
+
+### OpenNemo Test Checklist
+
+1. Run `./setup_nemoclaw.sh`.
+2. Run `./start_nemoclaw.sh`.
+3. Confirm gateway status:
+
+```bash
+openshell gateway list
+```
+
+4. Confirm Ollama health:
+
+```bash
+WIN_IP=$(ip route | awk '/default/ {print $3; exit}')
+curl http://$WIN_IP:11434/v1/models
+```
+
+5. Use the dashboard "Run Full System Check" button.
+6. Verify `OpenShell exec support` is enabled in the dashboard.
+7. Use the dashboard chat panel to send prompts.
+8. If exec is unsupported, use `openshell term` or upgrade OpenShell.
+
+### Example Prompts
+
+Use these as full OpenNemo test cases in the dashboard chat or via `agent -m`:
+
+```bash
+agent -m "What is the OS name and version?"
+agent -m "Show me the current working directory, list the files, and tell me which shell is active."
+agent -m "List all available OpenShell providers and sandboxes currently configured."
+agent -m "Give me a summary of GPU VRAM usage, temperature, and system health."
+agent -m "Read the contents of /etc/os-release and summarize the distribution info."
+agent -m "Display the first 20 lines of the NemoClaw repo README and tell me if the config file exists."
+agent -m "Check whether the Docker host socket at /var/run/docker.sock is available and report its permissions."
+```
+
+### OS-level interaction tests
+
+These prompts deliberately test NemoClaw with operating-system-level actions and environment awareness.
+
+```bash
+agent -m "Run 'uname -a' and summarize the kernel version and machine architecture."
+agent -m "Show me environment variables related to OLLAMA_HOST, DOCKER_HOST, and PATH."
+agent -m "List the contents of the current user's home directory and identify any .nemoclaw files."
+agent -m "Report the output of 'ps -ef | grep openshell' and whether the gateway process is running."
+agent -m "Inspect /proc/meminfo and describe available memory and swap usage."
+agent -m "Check if nvidia-smi is installed; if yes, return the GPU name and memory usage."
+agent -m "Read the current bash configuration from ~/.bashrc and identify the NemoClaw startup block."
+```
+
+### E2E OpenNemo test scenarios
+
+Run these in sequence to verify full interaction from host to sandbox:
+
+1. `openshell gateway list` — verify gateway status.
+2. `openshell provider list` — confirm provider discovery.
+3. `openshell sandbox list` — confirm sandbox availability.
+4. Send an agent prompt via the dashboard: `What is the OS name?`.
+5. Send an OS-level prompt: `List the current directory and report the top 5 files by size.`
+6. Send an Ollama-specific prompt: `Which Ollama model is currently configured in ~/.nemoclaw/credentials.json?`.
+7. Send a hardware probe prompt: `Report GPU name, VRAM used, VRAM total, and temperature.`
+
+### Example custom OpenShell commands
+
+```bash
+openshell provider list
+openshell sandbox list
+openshell gateway list
+openshell --help
+```
+
+### Pre-backed test examples
+
+These are ready-to-run prompts intended to verify OpenNemo capabilities end-to-end:
+
+```bash
+agent -m "Detect and return the Windows host IP from WSL and tell me if Ollama is reachable at port 11434."
+agent -m "Run 'ls -la ~/.nemoclaw' and tell me whether credentials.json exists and is readable."
+agent -m "Use the current NemoClaw environment to locate the Podman socket file /var/run/docker.sock and report its permissions."
+agent -m "Inspect the current WSL network route, find the default gateway, and verify connectivity to the Windows host."
+agent -m "Read the first 10 lines of ~/.bashrc and verify the NemoClaw startup IP updater is present."
+```
+
+### Example validation workflows
+
+- **Basic health validation:** run `Run Full System Check` in the dashboard, then send `What is the current OS and GPU status?`.
+- **Sandbox interaction validation:** start the gateway, then use the chat panel to request `List open sandboxes and providers`.
+- **OS-level validation:** use the chat panel to request `Show me environment variables for OLLAMA_HOST, DOCKER_HOST, and USER`.
+- **Model validation:** ask `Which Ollama model is configured in ~/.nemoclaw/credentials.json?` and verify the response.
+
+openshell gateway list
+openshell --help
+```
+
+### Recommended test workflow
+
+- Start the gateway.
+- Run the system health check.
+- Send a simple prompt such as `What is the OS name?`.
+- Send a second prompt such as `What model is configured in Ollama?`.
+- Validate the agent response and the `Last Output` panel.
 
 Because your setup involves Rootful Podman and a 14B model, the GPU will draw significant power.
 
@@ -235,6 +345,8 @@ streamlit run nemo_gui.py
 ```text
 http://127.0.0.1:8501
 ```
+
+**Note:** Streamlit runs headless in WSL - do not try to open the browser from WSL terminal. Always open from Windows browser.
 
 Install dependencies in WSL:
 

@@ -98,6 +98,33 @@ def gateway_status():
     return "stopped", "Named gateway not found"
 
 
+def detect_exec_support():
+    rc, out, err = run_cmd("openshell exec --help")
+    if rc == 0:
+        return True, "openshell exec supported"
+    message = err.strip() or out.strip()
+    return False, message or "openshell exec not supported"
+
+
+def run_system_health(win_ip, host):
+    checks = {}
+    checks["gateway"], checks["gateway_msg"] = gateway_status()
+    healthy, message = check_ollama_health(host)
+    checks["ollama"] = "ok" if healthy else "fail"
+    checks["ollama_msg"] = message
+    rc, out, err = list_providers()
+    checks["providers"] = "ok" if rc == 0 else "fail"
+    checks["providers_msg"] = out or err
+    rc, out, err = list_sandboxes()
+    checks["sandboxes"] = "ok" if rc == 0 else "fail"
+    checks["sandboxes_msg"] = out or err
+    healthy, gpu_data = query_nvidia()
+    checks["gpu"] = "ok" if healthy else "warn"
+    checks["gpu_msg"] = gpu_data
+    checks["exec_support"], checks["exec_msg"] = detect_exec_support()
+    return checks
+
+
 def list_providers():
     return run_cmd("openshell provider list")
 
@@ -120,6 +147,20 @@ def run_nemoclaw_start():
 
 def run_nemoclaw_stop():
     return run_cmd("nemoclaw stop")
+
+
+def run_setup_script():
+    return run_cmd("bash ./setup_nemoclaw.sh", timeout=300)
+
+
+def run_start_sequence():
+    gateway_rc, gateway_out, gateway_err = run_gateway_start()
+    nemoclaw_rc, nemoclaw_out, nemoclaw_err = run_nemoclaw_start()
+    out = "Gateway output:\n" + (gateway_out or gateway_err or "(no output)")
+    out += "\n\nNemoClaw output:\n" + (nemoclaw_out or nemoclaw_err or "(no output)")
+    err = "".join([gateway_err or "", "\n", nemoclaw_err or ""]).strip()
+    rc = 0 if gateway_rc == 0 and nemoclaw_rc == 0 else 1
+    return rc, out, err
 
 
 def run_chat(prompt):
@@ -250,6 +291,39 @@ with st.sidebar:
             st.error("NemoClaw stop failed")
 
     st.markdown("---")
+    st.header("Quick Start")
+    if st.button("Run Setup Script"):
+        rc, out, err = run_setup_script()
+        st.session_state.last_output = out or err
+        if rc == 0:
+            st.success("Setup script completed")
+        else:
+            st.error("Setup script failed")
+
+    if st.button("Start Gateway + Service"):
+        rc, out, err = run_start_sequence()
+        st.session_state.last_output = out or err
+        if rc == 0:
+            st.success("Gateway and NemoClaw started")
+        else:
+            st.error("Start sequence failed")
+            st.code(err)
+
+    if st.button("Run Full System Check"):
+        st.session_state.system_check = run_system_health(win_ip, ollama_host)
+
+    if "system_check" in st.session_state:
+        check = st.session_state.system_check
+        st.write("**Gateway:**", check["gateway"], check["gateway_msg"])
+        st.write("**Ollama:**", check["ollama"], check["ollama_msg"])
+        st.write("**Providers:**", check["providers"], check["providers_msg"])
+        st.write("**Sandboxes:**", check["sandboxes"], check["sandboxes_msg"])
+        st.write("**GPU:**", check["gpu"], check["gpu_msg"])
+        st.write("**OpenShell exec support:**", "yes" if check["exec_support"] else "no")
+        if not check["exec_support"]:
+            st.warning(check["exec_msg"])
+
+    st.markdown("---")
     st.header("OpenShell Control")
     if st.button("List Providers"):
         rc, out, err = list_providers()
@@ -281,15 +355,43 @@ cols = st.columns([2, 1])
 
 with cols[0]:
     st.subheader("Chat Interface")
-    prompt = st.text_input("Send a command to NemoClaw", "")
+    exec_supported, exec_msg = detect_exec_support()
+    if exec_supported:
+        st.success("OpenShell exec is available for agent commands.")
+    else:
+        st.warning("OpenShell exec is unavailable: " + exec_msg)
+        st.info("If your version of OpenShell does not support exec, run commands from openshell term or update OpenShell.")
+
+    examples = {
+        "Todo App Builder": "Create a complete Todo app in Python using Streamlit. Include full code for app.py, requirements.txt, and one example task.",
+        "Research Document": "Research the current state of multimodal LLMs, summarize the findings, and produce a short report with headings and recommendations.",
+        "OS & Environment Check": "Run 'uname -a' and list environment variables related to OLLAMA_HOST, DOCKER_HOST, and PATH.",
+        "GPU Health Summary": "Report GPU name, VRAM used, VRAM total, and temperature via the current WSL environment.",
+        "NemoClaw Config Audit": "Check whether ~/.nemoclaw/credentials.json exists, read its contents, and verify the Ollama host and model.",
+        "Windows Host Connectivity": "Detect the Windows host IP from WSL and verify Ollama is reachable on port 11434."
+    }
+
+    st.markdown("**Example Prompts**")
+    example_choice = st.selectbox("Choose a prebuilt example", list(examples.keys()))
+    if st.button("Load Example"):
+        st.session_state.prompt = examples[example_choice]
+
+    if "prompt" not in st.session_state:
+        st.session_state.prompt = ""
+
+    prompt = st.text_input("Send a command to NemoClaw", value=st.session_state.prompt, key="prompt")
     if st.button("Send to Agent"):
         if prompt:
-            st.session_state.messages.append({"role": "user", "content": prompt})
-            rc, out, err = run_chat(prompt)
-            if rc == 0:
-                st.session_state.messages.append({"role": "assistant", "content": out})
+            if exec_supported:
+                st.session_state.messages.append({"role": "user", "content": prompt})
+                rc, out, err = run_chat(prompt)
+                if rc == 0:
+                    st.session_state.messages.append({"role": "assistant", "content": out})
+                else:
+                    st.session_state.messages.append({"role": "assistant", "content": err or out})
             else:
-                st.session_state.messages.append({"role": "assistant", "content": err or out})
+                st.error("Cannot send agent prompts because OpenShell exec is not supported.")
+                st.session_state.messages.append({"role": "assistant", "content": "OpenShell exec unsupported - use openshell term or update your OpenShell CLI."})
 
     for message in st.session_state.messages:
         if message["role"] == "user":
