@@ -1,5 +1,7 @@
 import json
 import os
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -8,9 +10,15 @@ import streamlit as st
 CONFIG_PATH = Path.home() / ".nemoclaw" / "credentials.json"
 
 
+def command_exists(command):
+    return shutil.which(command) is not None
+
+
 def run_cmd(cmd, timeout=60, shell=True):
     env = os.environ.copy()
     env["DOCKER_HOST"] = "unix:///var/run/docker.sock"
+    if shell:
+        cmd = f"/bin/bash -lc {shlex.quote(cmd)}"
     result = subprocess.run(
         cmd,
         shell=shell,
@@ -86,6 +94,9 @@ def check_ollama_health(host):
 
 
 def gateway_status():
+    if not command_exists("openshell"):
+        return "unknown", "OpenShell not installed or not in PATH. Install OpenShell in WSL before using gateway commands."
+
     rc, out, err = run_cmd("openshell gateway list")
     if rc == 0:
         lines = [line for line in out.splitlines() if line.strip()]
@@ -98,16 +109,15 @@ def gateway_status():
 
     err_text = err.strip() or out.strip() or "Failed to query gateway status"
     if "unrecognized subcommand 'list'" in err_text or "unrecognized command 'list'" in err_text:
-        rc2, out2, err2 = run_cmd("openshell gateway status --name nemoclaw")
-        if rc2 == 0:
-            return "running", out2.strip() or "Gateway status available"
-        fallback = err2.strip() or out2.strip() or "Gateway status unavailable"
-        return "unknown", f"Gateway list unsupported. {fallback}"
+        return "unknown", "Gateway list unsupported by this OpenShell version. Use the Start Gateway button or update OpenShell."
 
     return "unknown", err_text
 
 
 def detect_exec_support():
+    if not command_exists("openshell"):
+        return False, "OpenShell not installed or not in PATH. Install it in WSL."
+
     rc, out, err = run_cmd("openshell exec --help")
     if rc == 0:
         return True, "openshell exec supported"
@@ -137,26 +147,42 @@ def run_system_health(win_ip, host):
 
 
 def list_providers():
+    if not command_exists("openshell"):
+        return 127, "", "OpenShell not installed or not in PATH."
     return run_cmd("openshell provider list")
 
 
 def list_sandboxes():
+    if not command_exists("openshell"):
+        return 127, "", "OpenShell not installed or not in PATH."
     return run_cmd("openshell sandbox list")
 
 
 def run_gateway_start():
-    return run_cmd("openshell gateway start --name nemoclaw --gpu")
+    if not command_exists("openshell"):
+        return 127, "", "OpenShell not installed or not in PATH."
+
+    rc, out, err = run_cmd("openshell gateway start --name nemoclaw --gpu")
+    if rc != 0 and ("unrecognized option '--gpu'" in err or "unknown option '--gpu'" in err):
+        return run_cmd("openshell gateway start --name nemoclaw")
+    return rc, out, err
 
 
 def run_gateway_stop():
+    if not command_exists("openshell"):
+        return 127, "", "OpenShell not installed or not in PATH."
     return run_cmd("openshell gateway stop --name nemoclaw")
 
 
 def run_nemoclaw_start():
+    if not command_exists("nemoclaw"):
+        return 127, "", "nemoclaw CLI not installed or not in PATH."
     return run_cmd("nemoclaw start")
 
 
 def run_nemoclaw_stop():
+    if not command_exists("nemoclaw"):
+        return 127, "", "nemoclaw CLI not installed or not in PATH."
     return run_cmd("nemoclaw stop")
 
 
@@ -177,6 +203,9 @@ def run_start_sequence():
 def run_chat(prompt):
     if not prompt:
         return 1, "", "Prompt is empty"
+    if not command_exists("openshell"):
+        return 127, "", "OpenShell not installed or not in PATH."
+
     command = ["openshell", "exec", "--name", "nemoclaw", "agent", "-m", prompt]
     return run_cmd_list(command, timeout=120)
 
@@ -224,19 +253,50 @@ st.markdown(
 
 st.title("🦾 NemoClaw Commander (RTX 5070 Ti)")
 
-if "last_output" not in st.session_state:
-    st.session_state.last_output = ""
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+st.session_state.setdefault("last_output", "")
+st.session_state.setdefault("messages", [])
+st.session_state.setdefault("prompt", "")
+st.session_state.setdefault("custom_cmd", "openshell status")
+st.session_state.setdefault("system_check", None)
+st.session_state.setdefault("startup_check", None)
 
 config = read_config() or {}
 ollama_config = config.get("ollama", {})
-default_host = ollama_config.get("host") or f"http://{get_default_win_ip()}:11434"
+default_win_ip = get_default_win_ip()
+default_host = ollama_config.get("host") or f"http://{default_win_ip}:11434"
 default_model = ollama_config.get("model") or "qwen2.5-coder:14b-instruct-q4_K_M"
+
+openshell_available = command_exists("openshell")
+nemo_available = command_exists("nemoclaw")
+
+if st.session_state.startup_check is None:
+    st.session_state.startup_check = run_system_health(default_win_ip, default_host)
 
 with st.sidebar:
     st.header("Connection Manager")
-    win_ip = st.text_input("Windows Host IP", value=get_default_win_ip())
+    st.markdown("**Environment:** WSL2 Ubuntu")
+    st.write("OpenShell in PATH:", "yes" if openshell_available else "no")
+    st.write("NemoClaw CLI in PATH:", "yes" if nemo_available else "no")
+    if not openshell_available:
+        st.warning("OpenShell is not installed or not available in WSL PATH.")
+    if not nemo_available:
+        st.warning("nemoclaw CLI is not installed or not available in WSL PATH.")
+
+    st.subheader("Startup Health Check")
+    check = st.session_state.startup_check
+    if check:
+        st.write("**Gateway:**", check["gateway"], check["gateway_msg"])
+        st.write("**Ollama:**", check["ollama"], check["ollama_msg"])
+        st.write("**Providers:**", check["providers"], check["providers_msg"])
+        st.write("**Sandboxes:**", check["sandboxes"], check["sandboxes_msg"])
+        st.write("**GPU:**", check["gpu"], check["gpu_msg"])
+        st.write("**OpenShell exec support:**", "yes" if check["exec_support"] else "no")
+        if not check["exec_support"]:
+            st.warning(check["exec_msg"])
+    else:
+        st.info("Running startup environment validation...")
+
+    win_ip = st.text_input("Windows Host IP", value=default_win_ip)
     ollama_host = st.text_input("OLLAMA_HOST", value=default_host)
     model = st.selectbox(
         "Ollama Model",
@@ -391,12 +451,7 @@ with cols[0]:
         else:
             st.session_state.custom_cmd = example_text
 
-    if "prompt" not in st.session_state:
-        st.session_state.prompt = ""
-    if "custom_cmd" not in st.session_state:
-        st.session_state.custom_cmd = ""
-
-    prompt = st.text_input("Send a command to NemoClaw", value=st.session_state.prompt, key="prompt")
+    prompt = st.text_input("Send a command to NemoClaw", key="prompt")
     if st.button("Send to Agent"):
         if prompt:
             if exec_supported:
@@ -418,7 +473,7 @@ with cols[0]:
 
     st.markdown("---")
     st.subheader("Custom OpenShell / Shell Command")
-    custom_cmd = st.text_input("Command", value=st.session_state.custom_cmd or "openshell status", key="custom_cmd")
+    custom_cmd = st.text_input("Command", key="custom_cmd")
     if st.button("Run Custom Command"):
         if custom_cmd:
             rc, out, err = run_cmd(custom_cmd)
