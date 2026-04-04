@@ -87,15 +87,24 @@ def check_ollama_health(host):
 
 def gateway_status():
     rc, out, err = run_cmd("openshell gateway list")
-    if rc != 0:
-        return "unknown", err or "Failed to query gateway status"
-    lines = [line for line in out.splitlines() if line.strip()]
-    for line in lines:
-        if "nemoclaw" in line:
-            if "Healthy" in line or "healthy" in line:
-                return "running", line.strip()
-            return "stopped", line.strip()
-    return "stopped", "Named gateway not found"
+    if rc == 0:
+        lines = [line for line in out.splitlines() if line.strip()]
+        for line in lines:
+            if "nemoclaw" in line:
+                if "Healthy" in line or "healthy" in line:
+                    return "running", line.strip()
+                return "stopped", line.strip()
+        return "stopped", "Named gateway not found"
+
+    err_text = err.strip() or out.strip() or "Failed to query gateway status"
+    if "unrecognized subcommand 'list'" in err_text or "unrecognized command 'list'" in err_text:
+        rc2, out2, err2 = run_cmd("openshell gateway status --name nemoclaw")
+        if rc2 == 0:
+            return "running", out2.strip() or "Gateway status available"
+        fallback = err2.strip() or out2.strip() or "Gateway status unavailable"
+        return "unknown", f"Gateway list unsupported. {fallback}"
+
+    return "unknown", err_text
 
 
 def detect_exec_support():
@@ -103,6 +112,8 @@ def detect_exec_support():
     if rc == 0:
         return True, "openshell exec supported"
     message = err.strip() or out.strip()
+    if "unrecognized subcommand 'exec'" in message or "unrecognized command 'exec'" in message:
+        return False, "OpenShell does not support exec on this version. Use direct shell commands or update OpenShell."
     return False, message or "openshell exec not supported"
 
 
@@ -363,21 +374,27 @@ with cols[0]:
         st.info("If your version of OpenShell does not support exec, run commands from openshell term or update OpenShell.")
 
     examples = {
-        "Todo App Builder": "Create a complete Todo app in Python using Streamlit. Include full code for app.py, requirements.txt, and one example task.",
-        "Research Document": "Research the current state of multimodal LLMs, summarize the findings, and produce a short report with headings and recommendations.",
-        "OS & Environment Check": "Run 'uname -a' and list environment variables related to OLLAMA_HOST, DOCKER_HOST, and PATH.",
-        "GPU Health Summary": "Report GPU name, VRAM used, VRAM total, and temperature via the current WSL environment.",
-        "NemoClaw Config Audit": "Check whether ~/.nemoclaw/credentials.json exists, read its contents, and verify the Ollama host and model.",
-        "Windows Host Connectivity": "Detect the Windows host IP from WSL and verify Ollama is reachable on port 11434."
+        "Todo App Builder (agent)": ("agent", "Create a complete Todo app in Python using Streamlit. Include full code for app.py, requirements.txt, and one example task."),
+        "Research Document (agent)": ("agent", "Research the current state of multimodal LLMs, summarize the findings, and produce a short report with headings and recommendations."),
+        "OS & Environment Check (shell)": ("shell", "uname -a && echo '---' && env | grep -E 'OLLAMA_HOST|DOCKER_HOST|PATH'"),
+        "GPU Health Summary (shell)": ("shell", "nvidia-smi --query-gpu=name,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits"),
+        "NemoClaw Config Audit (shell)": ("shell", "test -f ~/.nemoclaw/credentials.json && echo 'config exists' && cat ~/.nemoclaw/credentials.json"),
+        "Windows Host Connectivity (shell)": ("shell", "ip route | awk '/default/ {print $3; exit}' && curl -s --max-time 5 http://$(ip route | awk '/default/ {print $3; exit}'):11434/v1/tags")
     }
 
-    st.markdown("**Example Prompts**")
+    st.markdown("**Example Prompts & Commands**")
     example_choice = st.selectbox("Choose a prebuilt example", list(examples.keys()))
     if st.button("Load Example"):
-        st.session_state.prompt = examples[example_choice]
+        example_type, example_text = examples[example_choice]
+        if example_type == "agent":
+            st.session_state.prompt = example_text
+        else:
+            st.session_state.custom_cmd = example_text
 
     if "prompt" not in st.session_state:
         st.session_state.prompt = ""
+    if "custom_cmd" not in st.session_state:
+        st.session_state.custom_cmd = ""
 
     prompt = st.text_input("Send a command to NemoClaw", value=st.session_state.prompt, key="prompt")
     if st.button("Send to Agent"):
@@ -400,8 +417,8 @@ with cols[0]:
             st.markdown(f"**Agent:** {message['content']}")
 
     st.markdown("---")
-    st.subheader("Custom OpenShell Command")
-    custom_cmd = st.text_input("Command", "openshell status")
+    st.subheader("Custom OpenShell / Shell Command")
+    custom_cmd = st.text_input("Command", value=st.session_state.custom_cmd or "openshell status", key="custom_cmd")
     if st.button("Run Custom Command"):
         if custom_cmd:
             rc, out, err = run_cmd(custom_cmd)
