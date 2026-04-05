@@ -5,6 +5,8 @@ set -euo pipefail
 
 echo "🚀 Starting NemoClaw Automation for WSL2/Podman..."
 
+OPENCLAW_MODEL="gemma4:e4b"
+
 SOCKET_TARGET="/mnt/wsl/podman-sockets/podman-machine-default/podman-root.sock"
 
 if [[ ! -S "$SOCKET_TARGET" ]]; then
@@ -41,7 +43,7 @@ cat <<EOF > "$HOME/.nemoclaw/credentials.json"
   "provider": "ollama",
   "ollama": {
     "host": "http://$WIN_IP:11434",
-    "model": "qwen2.5-coder:14b-instruct-q4_K_M"
+    "model": "$OPENCLAW_MODEL"
   }
 }
 EOF
@@ -77,30 +79,34 @@ fi
 if command -v openshell >/dev/null 2>&1; then
   SANDBOX_NAME="nemoclaw-ollama"
   # Check gateway reachability before attempting provider/sandbox commands
-  GW_CHECK=$(openshell provider list 2>&1 || true)
+  GW_CHECK=$(openshell status 2>&1 || true)
   if echo "$GW_CHECK" | grep -qi "connection refused\|transport error"; then
     echo "ℹ️  OpenShell gateway not running — skipping sandbox auto-create."
     echo "    After running ./start_nemoclaw.sh, run ./simple_onboard.sh"
   else
     echo "🏗️  Checking OpenShell sandbox '$SANDBOX_NAME'..."
-    if openshell sandbox list 2>/dev/null | grep -q "$SANDBOX_NAME"; then
+    if openshell -g nemoclaw sandbox list 2>/dev/null | grep -q "$SANDBOX_NAME"; then
       echo "ℹ️  Sandbox '$SANDBOX_NAME' already exists."
     else
       echo "🔌 Registering Ollama provider (openai-compat type)..."
-      openshell provider create \
+      openshell -g nemoclaw provider create \
         --name ollama-local \
         --type openai \
         --credential OPENAI_API_KEY=ollama \
         --config base_url="http://$WIN_IP:11434/v1" 2>/dev/null || true
 
+      openshell -g nemoclaw provider update ollama-local \
+        --credential OPENAI_API_KEY=ollama \
+        --config base_url="http://$WIN_IP:11434/v1" 2>/dev/null || true
+
       echo "🧠 Setting gateway inference to Ollama..."
-      openshell inference set \
+      openshell -g nemoclaw inference set \
         --provider ollama-local \
-        --model "qwen2.5-coder:14b-instruct-q4_K_M" \
+        --model "$OPENCLAW_MODEL" \
         --no-verify 2>/dev/null || true
 
       echo "📦 Creating sandbox '$SANDBOX_NAME'..."
-      if openshell sandbox create \
+      if openshell -g nemoclaw sandbox create \
           --name "$SANDBOX_NAME" \
           --from openclaw \
           --provider ollama-local 2>/dev/null; then
@@ -108,9 +114,9 @@ if command -v openshell >/dev/null 2>&1; then
       else
         echo "⚠️  Sandbox creation failed (start the gateway first, then run ./simple_onboard.sh)."
         echo "    Manual steps after ./start_nemoclaw.sh:"
-        echo "      openshell provider create --name ollama-local --type openai --credential OPENAI_API_KEY=ollama --config base_url=http://$WIN_IP:11434/v1"
-        echo "      openshell inference set --provider ollama-local --model qwen2.5-coder:14b-instruct-q4_K_M --no-verify"
-        echo "      openshell sandbox create --name $SANDBOX_NAME --from openclaw --provider ollama-local"
+        echo "      openshell -g nemoclaw provider create --name ollama-local --type openai --credential OPENAI_API_KEY=ollama --config base_url=http://$WIN_IP:11434/v1"
+        echo "      openshell -g nemoclaw inference set --provider ollama-local --model $OPENCLAW_MODEL --no-verify"
+        echo "      openshell -g nemoclaw sandbox create --name $SANDBOX_NAME --from openclaw --provider ollama-local"
       fi
     fi
   fi

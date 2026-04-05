@@ -328,7 +328,7 @@ Enable it in GitHub:
 
 Your project page will publish to:
 
-`https://<your-github-username>.github.io/<repo-name>/`
+`https://suryakumaran2611.github.io/nemoclaw-podman-wsl2/`
 
 ---
 

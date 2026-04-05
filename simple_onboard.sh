@@ -7,6 +7,7 @@ set -euo pipefail
 
 SANDBOX_NAME="${1:-nemoclaw-ollama}"
 CREDENTIALS_FILE="$HOME/.nemoclaw/credentials.json"
+OPENCLAW_MODEL="gemma4:e4b"
 
 echo "🤖 NemoClaw Simple Onboard — sandbox: $SANDBOX_NAME"
 echo ""
@@ -41,9 +42,9 @@ MODEL=$(python3 -c "
 import json
 try:
     c = json.load(open('$CREDENTIALS_FILE'))
-    print(c.get('ollama', {}).get('model', 'qwen2.5-coder:14b-instruct-q4_K_M'))
+    print(c.get('ollama', {}).get('model', '$OPENCLAW_MODEL'))
 except Exception:
-    print('qwen2.5-coder:14b-instruct-q4_K_M')
+    print('$OPENCLAW_MODEL')
 ")
 
 if [[ -z "$WIN_IP" ]]; then
@@ -78,17 +79,21 @@ fi
 # OpenShell has no native 'ollama' type. Ollama exposes an OpenAI-compatible REST
 # API at /v1, so we register it as type 'openai' with a custom base_url.
 echo "🔌 Registering Ollama provider with OpenShell..."
-if openshell provider list 2>/dev/null | grep -q "ollama-local"; then
+if openshell -g nemoclaw provider list 2>/dev/null | grep -q "ollama-local"; then
   echo "ℹ️  Provider 'ollama-local' already registered."
+  openshell -g nemoclaw provider update \
+    ollama-local \
+    --credential OPENAI_API_KEY=ollama \
+    --config base_url="http://$WIN_IP:11434/v1" 2>/dev/null || true
 else
-  openshell provider create \
+  openshell -g nemoclaw provider create \
     --name ollama-local \
     --type openai \
     --credential OPENAI_API_KEY=ollama \
     --config base_url="http://$WIN_IP:11434/v1" && echo "✅ Provider registered." || {
     echo "❌ Failed to register provider."
     echo "   Manual command:"
-    echo "     openshell provider create --name ollama-local --type openai \\"
+    echo "     openshell -g nemoclaw provider create --name ollama-local --type openai \\\\"
     echo "       --credential OPENAI_API_KEY=ollama \\"
     echo "       --config base_url=http://$WIN_IP:11434/v1"
     exit 1
@@ -97,7 +102,7 @@ fi
 
 # --- Set gateway inference to use Ollama ---
 echo "🧠 Configuring gateway inference → Ollama ($MODEL)..."
-openshell inference set \
+openshell -g nemoclaw inference set \
   --provider ollama-local \
   --model "$MODEL" \
   --no-verify 2>/dev/null && echo "✅ Inference configured." || \
@@ -105,24 +110,24 @@ openshell inference set \
 
 # --- Create OpenClaw sandbox ---
 echo "📦 Creating sandbox '$SANDBOX_NAME'..."
-if openshell sandbox list 2>/dev/null | grep -q "$SANDBOX_NAME"; then
+if openshell -g nemoclaw sandbox list 2>/dev/null | grep -q "$SANDBOX_NAME"; then
   echo "ℹ️  Sandbox '$SANDBOX_NAME' already exists."
 else
-  if openshell sandbox create \
+  if openshell -g nemoclaw sandbox create \
       --name "$SANDBOX_NAME" \
       --from openclaw \
       --provider ollama-local 2>&1; then
     echo "✅ Sandbox '$SANDBOX_NAME' created."
   else
     echo "⚠️  Create with --from openclaw failed, trying bare create..."
-    openshell sandbox create --name "$SANDBOX_NAME" --provider ollama-local && \
+    openshell -g nemoclaw sandbox create --name "$SANDBOX_NAME" --provider ollama-local && \
       echo "✅ Sandbox '$SANDBOX_NAME' created." || {
       echo "❌ Sandbox creation failed."
       echo ""
       echo "Troubleshooting:"
       echo "  openshell gateway info --name nemoclaw"
-      echo "  openshell provider list"
-      echo "  openshell sandbox create --name $SANDBOX_NAME --from openclaw --provider ollama-local"
+      echo "  openshell -g nemoclaw provider list"
+      echo "  openshell -g nemoclaw sandbox create --name $SANDBOX_NAME --from openclaw --provider ollama-local"
       exit 1
     }
   fi
@@ -131,11 +136,11 @@ fi
 # --- Verify ---
 echo ""
 echo "📋 Current sandbox list:"
-openshell sandbox list 2>/dev/null || echo "(openshell sandbox list failed)"
+openshell -g nemoclaw sandbox list 2>/dev/null || echo "(openshell sandbox list failed)"
 
 echo ""
 echo "📋 Inference config:"
-openshell inference get 2>/dev/null || true
+openshell -g nemoclaw inference get 2>/dev/null || true
 
 echo ""
 echo "✅ Onboarding complete!"

@@ -302,9 +302,9 @@ MODEL=$(python3 -c "
 import json
 try:
     c = json.load(open('$CREDENTIALS_FILE'))
-    print(c.get('ollama', {}).get('model', 'qwen2.5-coder:14b-instruct-q4_K_M'))
+  print(c.get('ollama', {}).get('model', 'gemma4:e4b'))
 except Exception:
-    print('qwen2.5-coder:14b-instruct-q4_K_M')
+  print('gemma4:e4b')
 " 2>/dev/null)
 
 [[ -z "$WIN_IP" ]] && WIN_IP=$(ip route | awk '/default/ {print $3; exit}')
@@ -402,7 +402,7 @@ elif ollama_error "$GENERATE_OUTPUT"; then
   warn "Ollama /api/generate returned an error (not a connectivity failure): $ERR_MSG"
   if echo "$ERR_MSG" | grep -qi "memory"; then
     info "Model cannot load due to insufficient RAM. Free memory and retry, or use a smaller model."
-    info "To pull a smaller model: ollama pull qwen2.5-coder:7b-instruct-q4_K_M"
+    info "To pull the runtime model used by this script: ollama pull gemma4:e4b"
   fi
 else
   fail "Ollama /api/generate did not return a usable response"
@@ -909,7 +909,7 @@ except Exception:
     info "Response:\n$SUBST_TEXT"
   elif [[ "${OLLAMA_OOM:-0}" -eq 1 ]]; then
     warn "Ollama-direct agent substitute skipped — model OOM (not enough free RAM to load model)"
-    info "Free memory and retry, or pull a smaller model: ollama pull qwen2.5-coder:7b-instruct-q4_K_M"
+    info "Free memory and retry, or pull the runtime model used by this script: ollama pull gemma4:e4b"
   else
     fail "Ollama-direct agent substitute test failed — no response"
   fi
