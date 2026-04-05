@@ -301,11 +301,92 @@ def run_start_sequence():
     return rc, out, err
 
 
-def run_chat(prompt):
+def run_chat(prompt, ollama_host, model):
+    """Send prompt directly to Ollama REST API. No sandbox or openclaw required."""
     if not prompt:
         return 1, "", "Prompt is empty"
-    # Since OpenShell exec is not supported, return a message to use the official UI
-    return 0, "", "OpenShell exec is not supported. Use the 'Open Official Web UI' button to access the agent chat interface."
+
+    host = (ollama_host or "").rstrip("/")
+    if not host:
+        return 1, "", "Ollama host not configured. Set it in the sidebar and save."
+
+    model = model or "qwen2.5-coder:14b-instruct-q4_K_M"
+
+    # Try /api/chat (conversational endpoint)
+    payload = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    })
+    cmd = f"curl -s --max-time 120 -X POST {host}/api/chat -H 'Content-Type: application/json' -d {shlex.quote(payload)}"
+    rc, out, err = run_cmd(cmd, timeout=130)
+    if rc == 0 and out:
+        try:
+            data = json.loads(out)
+            msg = data.get("message", {})
+            if isinstance(msg, dict) and "content" in msg:
+                return 0, msg["content"], ""
+            if "response" in data:
+                return 0, data["response"], ""
+        except json.JSONDecodeError:
+            return 0, out, ""
+
+    # Fallback: /api/generate
+    payload = json.dumps({
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+    })
+    cmd = f"curl -s --max-time 120 -X POST {host}/api/generate -H 'Content-Type: application/json' -d {shlex.quote(payload)}"
+    rc, out, err = run_cmd(cmd, timeout=130)
+    if rc == 0 and out:
+        try:
+            data = json.loads(out)
+            return 0, data.get("response", out), ""
+        except json.JSONDecodeError:
+            return 0, out, ""
+
+    return rc, out or "", err or "Ollama request failed. Check the host and model in the sidebar."
+
+
+def create_sandbox(sandbox_name, win_ip, model):
+    """Register Ollama as an OpenShell provider and create a sandbox.
+    OpenShell has no native 'ollama' type; Ollama exposes an OpenAI-compatible
+    API at /v1, so we register it as type 'openai' with a custom base_url.
+    """
+    if not command_exists("openshell"):
+        return 1, "", "OpenShell not installed or not in PATH."
+
+    rc, out, _ = run_cmd("openshell sandbox list")
+    if rc == 0 and sandbox_name in out:
+        return 0, f"Sandbox '{sandbox_name}' already exists.", ""
+
+    # Register provider (idempotent — errors silently if already exists)
+    run_cmd(
+        f"openshell provider create --name ollama-local --type openai"
+        f" --credential OPENAI_API_KEY=ollama"
+        f" --config base_url=http://{win_ip}:11434/v1"
+    )
+
+    # Set gateway inference to use this provider
+    run_cmd(
+        f"openshell inference set --provider ollama-local"
+        f" --model {shlex.quote(model)} --no-verify"
+    )
+
+    # Create OpenClaw sandbox backed by the provider
+    rc, out, err = run_cmd(
+        f"openshell sandbox create --name {shlex.quote(sandbox_name)}"
+        f" --from openclaw --provider ollama-local"
+    )
+    if rc != 0:
+        # Fallback: try without --from openclaw
+        rc, out, err = run_cmd(
+            f"openshell sandbox create --name {shlex.quote(sandbox_name)}"
+            f" --provider ollama-local"
+        )
+    return rc, out, err
+
 
 
 def query_nvidia():
@@ -395,9 +476,9 @@ with st.sidebar:
         st.write("**Providers:**", check["providers"], check["providers_msg"])
         st.write("**Sandboxes:**", check["sandboxes"], check["sandboxes_msg"])
         st.write("**GPU:**", check["gpu"], check["gpu_msg"])
-        st.write("**OpenShell exec support:**", "yes" if check["exec_support"] else "no")
+        st.write("**OpenShell exec support:**", "yes" if check["exec_support"] else "no (agent -m works)")
         if not check["exec_support"]:
-            st.warning(check["exec_msg"])
+            st.info("Agent commands available via 'agent -m' in chat panel.")
     else:
         st.info("Running startup environment validation...")
 
@@ -507,9 +588,9 @@ with st.sidebar:
         st.write("**Providers:**", check["providers"], check["providers_msg"])
         st.write("**Sandboxes:**", check["sandboxes"], check["sandboxes_msg"])
         st.write("**GPU:**", check["gpu"], check["gpu_msg"])
-        st.write("**OpenShell exec support:**", "yes" if check["exec_support"] else "no")
+        st.write("**OpenShell exec support:**", "yes" if check["exec_support"] else "no (agent -m works)")
         if not check["exec_support"]:
-            st.warning(check["exec_msg"])
+            st.info("Agent commands available via 'agent -m' in chat panel.")
 
     st.markdown("---")
     st.header("OpenShell Control")
@@ -521,10 +602,29 @@ with st.sidebar:
         rc, out, err = list_sandboxes()
         st.session_state.last_output = out or err
         st.code(out or err)
+    sandbox_name_input = st.text_input("Sandbox Name", value="nemoclaw-ollama")
+    if st.button("Create Sandbox"):
+        rc, out, err = create_sandbox(sandbox_name_input, win_ip, model)
+        st.session_state.last_output = out or err
+        if rc == 0:
+            st.success(f"Sandbox ready: {sandbox_name_input}")
+            st.code(out or "(sandbox exists or was created)")
+        else:
+            st.error("Sandbox creation failed")
+            st.code(err or out)
     if st.button("Refresh Gateway Status"):
         status, status_msg = gateway_status()
         st.session_state.last_output = status_msg
         st.info(status_msg)
+    if st.button("Check Gateway Health"):
+        rc, out, err = run_cmd("openshell gateway list")
+        st.session_state.last_output = out or err
+        if rc == 0:
+            st.success("Gateway list retrieved")
+            st.code(out)
+        else:
+            st.error("Failed to get gateway list")
+            st.code(err or out)
 
     st.markdown("---")
     st.header("Quick Actions")
@@ -543,36 +643,44 @@ cols = st.columns([2, 1])
 
 with cols[0]:
     st.subheader("Chat Interface")
+
+    # Chat uses direct Ollama API — no openclaw or sandbox required
+    ollama_ok, _ = check_ollama_health(ollama_host)
+    if ollama_ok:
+        st.success(f"✅ Ollama reachable at `{ollama_host}` — chat is ready.")
+    else:
+        st.error(
+            f"⚠️ **Ollama not reachable at {ollama_host}**  \n"
+            "Check the host in the sidebar and ensure Ollama is running on Windows."
+        )
+
     exec_supported, exec_msg = detect_exec_support()
     if exec_supported:
-        st.success("OpenShell exec is available for agent commands.")
+        st.success("OpenShell exec is available for direct shell commands.")
     else:
-        st.warning("OpenShell exec is unavailable: " + exec_msg)
-        st.info("Use the 'Open Official Web UI' button in the sidebar to access the agent chat interface.")
+        st.info("OpenShell exec unavailable, but agent commands work via 'agent -m'.")
+        st.info("Use the 'Open Official Web UI' button for full agent chat interface.")
 
     examples = {
-        "Todo App Builder (agent)": ("agent", "Create a complete Todo app in Python using Streamlit. Include full code for app.py, requirements.txt, and one example task."),
-        "Research Document (agent)": ("agent", "Research the current state of multimodal LLMs, summarize the findings, and produce a short report with headings and recommendations."),
-        "OS & Environment Check (shell)": ("shell", "uname -a && echo '---' && env | grep -E 'OLLAMA_HOST|DOCKER_HOST|PATH'"),
-        "GPU Health Summary (shell)": ("shell", "nvidia-smi --query-gpu=name,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits"),
-        "NemoClaw Config Audit (shell)": ("shell", "test -f ~/.nemoclaw/credentials.json && echo 'config exists' && cat ~/.nemoclaw/credentials.json"),
-        "Windows Host Connectivity (shell)": ("shell", "ip route | awk '/default/ {print $3; exit}' && curl -s --max-time 5 http://$(ip route | awk '/default/ {print $3; exit}'):11434/v1/tags")
+        "Todo App Builder": ("agent", "Create a complete Todo app in Python using Streamlit. Include full code for app.py, requirements.txt, and one example task."),
+        "Research Document": ("agent", "Research the current state of multimodal LLMs, summarize the findings, and produce a short report with headings and recommendations."),
+        "OS & Environment Check": ("agent", "Run the command: uname -a && echo '---' && env | grep -E 'OLLAMA_HOST|DOCKER_HOST|PATH'"),
+        "GPU Health Summary": ("agent", "Run the command: nvidia-smi --query-gpu=name,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits"),
+        "NemoClaw Config Audit": ("agent", "Run the command: test -f ~/.nemoclaw/credentials.json && echo 'config exists' && cat ~/.nemoclaw/credentials.json"),
+        "Windows Host Connectivity": ("agent", "Run the command: ip route | awk '/default/ {print $3; exit}' && curl -s --max-time 5 http://$(ip route | awk '/default/ {print $3; exit}'):11434/v1/tags")
     }
 
     st.markdown("**Example Prompts & Commands**")
     example_choice = st.selectbox("Choose a prebuilt example", list(examples.keys()))
     if st.button("Load Example"):
         example_type, example_text = examples[example_choice]
-        if example_type == "agent":
-            st.session_state.prompt = example_text
-        else:
-            st.session_state.custom_cmd = example_text
+        st.session_state.prompt = example_text
 
     prompt = st.text_input("Send a command to NemoClaw", key="prompt")
     if st.button("Send to Agent"):
         if prompt:
             st.session_state.messages.append({"role": "user", "content": prompt})
-            rc, out, err = run_chat(prompt)
+            rc, out, err = run_chat(prompt, ollama_host, model)
             st.session_state.messages.append({"role": "assistant", "content": out or err or "Command executed"})
 
     for message in st.session_state.messages:

@@ -1,27 +1,67 @@
-# NemoClaw v0.0.6: WSL2 + Podman + Windows Ollama Setup
+# NemoClaw: WSL2 + Windows Podman + Windows Ollama
 
-Target Hardware: MSI Vector (RTX 5070 Ti / 12GB VRAM)
-Environment: WSL2 (Ubuntu) + Rootful Podman + Windows-hosted Ollama
+**Target Hardware:** MSI Vector (RTX 5070 Ti / 12GB VRAM)  
+**Environment:** WSL2 Ubuntu · Rootful Podman on Windows · Ollama on Windows
 
-## 1. Windows Host Prep
+## Architecture
 
-1. Open PowerShell as Admin and run:
+```
+Windows Host
+├── Podman Desktop (rootful)   ← container runtime
+│   └── socket: /mnt/wsl/podman-sockets/podman-machine-default/podman-root.sock
+└── Ollama (listening on 0.0.0.0:11434)  ← AI model server
 
-```powershell
-Set-NetFirewallRule -DisplayName "Ollama" -RemoteAddress Any
+WSL2 Ubuntu
+├── /var/run/docker.sock  ← symlink → Podman rootful socket (no Docker installed)
+├── DOCKER_HOST=unix:///var/run/docker.sock
+├── ~/.nemoclaw/credentials.json  ← Ollama host + model
+├── nemoclaw / openshell CLIs
+└── Streamlit GUI (nemo_gui.py)  ← talks directly to Ollama REST API
 ```
 
-2. Set the Ollama host environment variable:
+There is **no Docker** in this setup. All container operations go through the
+Podman rootful socket bridged to `/var/run/docker.sock`.
+
+---
+
+## File Inventory
+
+| File | Purpose |
+|------|---------|
+| `setup_nemoclaw.sh` | One-time setup: socket bridge, credentials, auto-IP update in bashrc, sandbox creation |
+| `start_nemoclaw.sh` | Daily startup: bridge socket, start gateway + NemoClaw service |
+| `simple_onboard.sh` | Automated sandbox creation via OpenShell (no interactive prompts) |
+| `wsl_nemoclaw_autoupdate.sh` | Refresh Windows host IP in credentials.json when WSL restarts |
+| `test_sandbox.sh` | End-to-end sandbox + Ollama test suite |
+| `nemo_gui.py` | Streamlit dashboard — chat, gateway control, health checks |
+| `requirements.txt` | Python deps for nemo_gui.py |
+
+---
+
+## 1. Windows Host Preparation
+
+### 1a. Ollama
+
+Open PowerShell (does not require Admin):
 
 ```powershell
+# Allow Ollama to listen on all interfaces
 [System.Environment]::SetEnvironmentVariable('OLLAMA_HOST', '0.0.0.0', 'User')
 ```
 
-3. Fully quit and restart the Ollama app.
+Open PowerShell **as Administrator**:
 
-## 2. Podman Configuration
+```powershell
+# Open firewall for WSL2 to reach Ollama
+Set-NetFirewallRule -DisplayName "Ollama" -RemoteAddress Any
+```
 
-NemoClaw requires Rootful mode to manage its internal K3s network.
+Fully quit and restart the Ollama app after changing the environment variable.
+
+### 1b. Podman
+
+NemoClaw requires **rootful** Podman so it can manage its internal K3s network.
+Run these commands in Windows PowerShell or the Podman Desktop terminal:
 
 ```bash
 podman machine stop
@@ -29,362 +69,308 @@ podman machine set --rootful
 podman machine start
 ```
 
-## 3. Automation Scripts
+---
 
-Use the provided `setup_nemoclaw.sh` to automate the socket bridging and credential generation. Use `start_nemoclaw.sh` for daily operation.
-
-### setup_nemoclaw.sh
-
-This script fixes the socket, detects the Windows host IP using PowerShell if available, and writes the hidden NemoClaw credentials.
+## 2. WSL2 First-Time Setup
 
 ```bash
-#!/bin/bash
-# setup_nemoclaw.sh
+# Clone or copy the repo files into WSL
+chmod +x setup_nemoclaw.sh start_nemoclaw.sh simple_onboard.sh \
+         wsl_nemoclaw_autoupdate.sh test_sandbox.sh
 
-set -euo pipefail
-
-echo "🚀 Starting NemoClaw Automation for WSL2/Podman..."
-
-# 1. Fix Podman Socket Bridge
-echo "🔗 Bridging Podman Rootful Socket..."
-sudo rm -f /var/run/docker.sock
-sudo ln -s /mnt/wsl/podman-sockets/podman-machine-default/podman-root.sock /var/run/docker.sock
-sudo chmod 666 /var/run/docker.sock
-
-# 2. Detect Windows Host IP
-WIN_IP=""
-if command -v powershell.exe >/dev/null 2>&1; then
-  WIN_IP=$(powershell.exe -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notmatch '^(169|127)' } | Select-Object -ExpandProperty IPAddress)" | tr -d '\r' | awk 'NF {print; exit}')
-fi
-if [[ -z "$WIN_IP" ]]; then
-  WIN_IP=$(ip route | grep default | awk '{print $3}')
-fi
-if [[ -z "$WIN_IP" ]]; then
-  echo "❌ Unable to detect Windows host IP from WSL2."
-  exit 1
-fi
-
-echo "🌐 Detected Windows IP: $WIN_IP"
-
-# 3. Create Credentials (Bypassing 'onboard' bug)
-echo "📝 Writing credentials.json..."
-mkdir -p ~/.nemoclaw
-cat <<EOF > ~/.nemoclaw/credentials.json
-{
-  "provider": "ollama",
-  "ollama": {
-    "host": "http://$WIN_IP:11434",
-    "model": "qwen2.5-coder:14b-instruct-q4_K_M"
-  }
-}
-EOF
-chmod 600 ~/.nemoclaw/credentials.json
-
-echo "✅ Setup Complete. Run ./start_nemoclaw.sh to begin."
+# Install Python dependencies (uses venv)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-### start_nemoclaw.sh
+---
 
-This handles the "Day 2" operations, ensuring the gateway and services start in the correct order.
+## 3. setup_nemoclaw.sh
 
-```bash
-#!/bin/bash
-# start_nemoclaw.sh
-
-export DOCKER_HOST=unix:///var/run/docker.sock
-
-echo "🔥 Initializing RTX 5070 Ti Gateway..."
-openshell gateway start --name nemoclaw --gpu
-
-echo "🛡️ Starting NemoClaw Services..."
-nemoclaw start
-
-echo "✨ System Ready. Entering Sandbox..."
-openshell term
-```
-
-## 4. Auto-Update Windows IP on WSL Startup
-
-WSL2 IPs change every reboot. The install script now adds an auto-update block to `~/.bashrc` so `~/.nemoclaw/credentials.json` refreshes each time you open a new shell.
-
-A dedicated updater script is also included:
-
-```bash
-./wsl_nemoclaw_autoupdate.sh
-```
-
-This script is useful if you want to refresh the Windows host IP manually without restarting your shell.
-
-## 5. Podman as Docker in WSL
-
-The setup script also configures WSL to use the Podman rootful socket as the default `DOCKER_HOST`:
-
-```bash
-export DOCKER_HOST=unix:///var/run/docker.sock
-alias docker=podman
-```
-
-That means Docker-style clients in WSL will talk to the Windows Podman socket without extra manual configuration.
-
-## 6. Using Ollama with NemoClaw
-
-NemoClaw uses Ollama as a REST provider from Windows. The WSL guest must be able to reach Ollama over the Windows host IP and port `11434`.
-
-1. Ensure Windows Ollama is running.
-2. Set the host variable in Windows PowerShell:
-
-```powershell
-[System.Environment]::SetEnvironmentVariable('OLLAMA_HOST', '0.0.0.0', 'User')
-```
-
-3. Allow port `11434` through Windows Firewall for the WSL IP range.
-4. Restart the Ollama app fully after changing the host.
-
-### Verify Ollama from WSL
-
-From Ubuntu WSL, confirm connectivity using the current Ollama REST path:
-
-```bash
-WIN_IP=$(ip route | awk '/default/ {print $3; exit}')
-curl http://$WIN_IP:11434/api/tags
-```
-
-If this returns a JSON object containing `"models"`, the network path is working.
-
-If the default route IP is not reachable, use the dashboard's detected Windows host candidates or copy the actual Windows host IP from PowerShell / `ipconfig` and use that address instead.
-
-### NemoClaw Ollama credentials
-
-The install script writes `~/.nemoclaw/credentials.json` with the current Windows host IP and the configured model:
-
-```json
-{
-  "provider": "ollama",
-  "ollama": {
-    "host": "http://<windows-ip>:11434",
-    "model": "qwen2.5-coder:14b-instruct-q4_K_M"
-  }
-}
-```
-
-If WSL IP changes, rerun `./wsl_nemoclaw_autoupdate.sh` or reopen a shell after setup.
-
-## 7. Streamlit NemoClaw Commander
-
-A single Streamlit dashboard is now the primary GUI for NemoClaw. It can perform key NemoClaw and OpenShell sandbox actions in a WSL2 environment.
-
-### Features
-
-- Connection Manager for `WIN_IP` and `OLLAMA_HOST`
-- Ollama health check via the WSL HTTP path
-- Sandbox gateway start/stop and status display
-- NemoClaw service start/stop controls
-- Automated full system health check
-- OpenShell sandbox listing and control commands
-- Direct link to the official NemoClaw web UI on the Windows host
-- Hardware monitor with `nvidia-smi` metrics when available
-- Quick Actions for project analysis, git status, and README generation
-
-### Install and launch
-
-Install Python dependencies in WSL:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-Run the dashboard:
-
-```bash
-streamlit run nemo_gui.py
-```
-
-Open the browser on Windows at:
-
-```text
-http://127.0.0.1:8501
-```
-
-### Notes
-
-- The dashboard runs inside WSL and uses `DOCKER_HOST=unix:///var/run/docker.sock` for every command.
-- Make sure the Podman rootful socket is bridged before launching Streamlit.
-- Streamlit is configured to run headless (no auto-browser opening) to avoid WSL browser issues.
-- Telemetry and email prompts are disabled via `.streamlit/config.toml`.
-- The sidebar includes a Quick Start checklist with clickable buttons for setup, gateway service startup, and health checks.
-
-### Troubleshooting
-
-- **"Connection refused" errors**: Ensure Podman Machine is running and rootful mode is enabled.
-- **Ollama health check fails**: Verify Windows Ollama is running and firewall allows port 11434.
-- **Windows Web UI not reachable**: Use the detected Windows host IP from the sidebar and open `http://<windows-ip>:18789` in a Windows browser. If the dashboard shows the wrong IP, enter the correct one manually in the sidebar and save the Ollama config.
-- **Browser won't open**: Streamlit runs headless in WSL - always open `http://127.0.0.1:8501` from Windows browser.
-- **Streamlit email prompt**: The config disables this.
-
-### OpenNemo Test Checklist
-
-1. Run `./setup_nemoclaw.sh`.
-2. Run `./start_nemoclaw.sh`.
-3. Confirm gateway status:
-
-```bash
-openshell gateway list
-```
-
-4. Confirm Ollama health:
-
-```bash
-WIN_IP=$(ip route | awk '/default/ {print $3; exit}')
-curl http://$WIN_IP:11434/v1/models
-```
-
-5. Use the dashboard "Run Full System Check" button.
-6. Verify `OpenShell exec support` is enabled in the dashboard.
-7. Use the dashboard chat panel to send prompts.
-8. If exec is unsupported, use `openshell term` or upgrade OpenShell.
-
-### Example Prompts
-
-Use these as full OpenNemo test cases in the dashboard chat or via `agent -m`:
-
-```bash
-agent -m "What is the OS name and version?"
-agent -m "Show me the current working directory, list the files, and tell me which shell is active."
-agent -m "List all available OpenShell providers and sandboxes currently configured."
-agent -m "Give me a summary of GPU VRAM usage, temperature, and system health."
-agent -m "Read the contents of /etc/os-release and summarize the distribution info."
-agent -m "Display the first 20 lines of the NemoClaw repo README and tell me if the config file exists."
-agent -m "Check whether the Docker host socket at /var/run/docker.sock is available and report its permissions."
-```
-
-### OS-level interaction tests
-
-These prompts deliberately test NemoClaw with operating-system-level actions and environment awareness.
-
-```bash
-agent -m "Run 'uname -a' and summarize the kernel version and machine architecture."
-agent -m "Show me environment variables related to OLLAMA_HOST, DOCKER_HOST, and PATH."
-agent -m "List the contents of the current user's home directory and identify any .nemoclaw files."
-agent -m "Report the output of 'ps -ef | grep openshell' and whether the gateway process is running."
-agent -m "Inspect /proc/meminfo and describe available memory and swap usage."
-agent -m "Check if nvidia-smi is installed; if yes, return the GPU name and memory usage."
-agent -m "Read the current bash configuration from ~/.bashrc and identify the NemoClaw startup block."
-```
-
-### E2E OpenNemo test scenarios
-
-Run these in sequence to verify full interaction from host to sandbox:
-
-1. `openshell gateway list` — verify gateway status.
-2. `openshell provider list` — confirm provider discovery.
-3. `openshell sandbox list` — confirm sandbox availability.
-4. Send an agent prompt via the dashboard: `What is the OS name?`.
-5. Send an OS-level prompt: `List the current directory and report the top 5 files by size.`
-6. Send an Ollama-specific prompt: `Which Ollama model is currently configured in ~/.nemoclaw/credentials.json?`.
-7. Send a hardware probe prompt: `Report GPU name, VRAM used, VRAM total, and temperature.`
-
-### Example custom OpenShell commands
-
-```bash
-openshell provider list
-openshell sandbox list
-openshell gateway list
-openshell --help
-```
-
-### Pre-backed test examples
-
-These are ready-to-run prompts intended to verify OpenNemo capabilities end-to-end:
-
-```bash
-agent -m "Detect and return the Windows host IP from WSL and tell me if Ollama is reachable at port 11434."
-agent -m "Run 'ls -la ~/.nemoclaw' and tell me whether credentials.json exists and is readable."
-agent -m "Use the current NemoClaw environment to locate the Podman socket file /var/run/docker.sock and report its permissions."
-agent -m "Inspect the current WSL network route, find the default gateway, and verify connectivity to the Windows host."
-agent -m "Read the first 10 lines of ~/.bashrc and verify the NemoClaw startup IP updater is present."
-```
-
-### Example validation workflows
-
-- **Basic health validation:** run `Run Full System Check` in the dashboard, then send `What is the current OS and GPU status?`.
-- **Sandbox interaction validation:** start the gateway, then use the chat panel to request `List open sandboxes and providers`.
-- **OS-level validation:** use the chat panel to request `Show me environment variables for OLLAMA_HOST, DOCKER_HOST, and USER`.
-- **Model validation:** ask `Which Ollama model is configured in ~/.nemoclaw/credentials.json?` and verify the response.
-
-openshell gateway list
-openshell --help
-```
-
-### Recommended test workflow
-
-- Start the gateway.
-- Run the system health check.
-- Send a simple prompt such as `What is the OS name?`.
-- Send a second prompt such as `What model is configured in Ollama?`.
-- Validate the agent response and the `Last Output` panel.
-
-Because your setup involves Rootful Podman and a 14B model, the GPU will draw significant power.
-
-- Thermal Ceiling: Your 12GB VRAM may be at ~90% capacity.
-- Manual Fan Control: Use Fn + F8 (Cooler Boost). If the laptop hits 100°C, Windows may throttle the WSL2 instance, causing timeouts.
-
-## Usage
-
-1. Copy these files into the repository: `setup_nemoclaw.sh`, `start_nemoclaw.sh`, `wsl_nemoclaw_autoupdate.sh`, `nemo_gui.py`, and `requirements.txt`.
-2. Make them executable:
-
-```bash
-chmod +x setup_nemoclaw.sh start_nemoclaw.sh wsl_nemoclaw_autoupdate.sh
-```
-
-3. Run the setup script first:
+Run once after cloning. Run again any time the Podman socket changes.
 
 ```bash
 ./setup_nemoclaw.sh
 ```
 
-4. After setup, start NemoClaw with:
+What it does, in order:
+
+1. **Verifies** the Podman rootful socket exists at  
+   `/mnt/wsl/podman-sockets/podman-machine-default/podman-root.sock`
+2. **Bridges** it to `/var/run/docker.sock` so NemoClaw and OpenShell treat it
+   as a Docker-compatible socket
+3. **Detects** the correct Windows host IP using PowerShell, excluding virtual
+   adapters (`vEthernet`, `WSL`, `Hyper-V`)
+4. **Writes** `~/.nemoclaw/credentials.json` with the Ollama host and model
+5. **Seeds** `~/.bashrc` with `DOCKER_HOST`, a `docker=podman` alias, and an
+   `update_nemoclaw_ip()` function that refreshes the IP on every new shell
+6. **Creates** the OpenShell sandbox automatically (if `openshell` is available):
+   - Registers `ollama-local` provider pointing at the detected Ollama host
+   - Creates `nemoclaw-ollama` sandbox backed by that provider
+
+---
+
+## 4. simple_onboard.sh
+
+If the sandbox was not created by `setup_nemoclaw.sh` (e.g. the gateway was not
+running yet), run this script after `./start_nemoclaw.sh`:
+
+```bash
+./simple_onboard.sh             # creates sandbox named "nemoclaw-ollama"
+./simple_onboard.sh my-sandbox  # custom sandbox name
+```
+
+What it does:
+
+1. Reads host and model from `~/.nemoclaw/credentials.json`
+2. Tests Ollama connectivity (warns but continues if unreachable)
+3. Registers `ollama-local` provider with OpenShell (idempotent)
+4. Creates the named sandbox — falls back to provider-less creation if needed
+5. Lists current sandboxes to confirm success
+
+---
+
+## 5. Daily Startup (start_nemoclaw.sh)
 
 ```bash
 ./start_nemoclaw.sh
 ```
 
-5. Start the Streamlit dashboard:
+- Sets `DOCKER_HOST`
+- Starts `openshell gateway --name nemoclaw --gpu`
+- Starts `nemoclaw start`
+- Drops into `openshell term` (interactive sandbox shell) — **this blocks the terminal**
+
+Because `start_nemoclaw.sh` opens `openshell term` at the end, open a **second WSL terminal** to run the Streamlit dashboard:
+
+Then start the Streamlit dashboard:
 
 ```bash
-streamlit run nemo_gui.py
+source .venv/bin/activate
+streamlit run nemo_gui.py --server.headless true --server.port 8501
 ```
 
-6. Open the browser on Windows at:
+Open in the **Windows browser** (not WSL browser):
 
-```text
+```
 http://127.0.0.1:8501
 ```
 
-**Note:** Streamlit runs headless in WSL - do not try to open the browser from WSL terminal. Always open from Windows browser.
+---
 
-Install dependencies in WSL:
+## 6. wsl_nemoclaw_autoupdate.sh
 
-```bash
-python -m pip install -r requirements.txt
-```
-
-Run the dashboard:
+WSL2 assigns a new IP to the Windows host after every reboot. Run this script
+to refresh `credentials.json` without re-running the full setup:
 
 ```bash
-streamlit run nemo_gui.py
+./wsl_nemoclaw_autoupdate.sh
 ```
 
-Open the browser on Windows at:
+The `~/.bashrc` block added by `setup_nemoclaw.sh` also calls
+`update_nemoclaw_ip()` automatically every time a new shell opens, so manual
+execution is only needed if you want to refresh mid-session.
 
-```text
-http://127.0.0.1:8501
+---
+
+## 7. test_sandbox.sh
+
+Runs a full end-to-end test of the stack and prints colour-coded `[PASS]` /
+`[FAIL]` for each check.
+
+```bash
+./test_sandbox.sh                # tests sandbox "nemoclaw-ollama"
+./test_sandbox.sh my-sandbox     # tests a custom sandbox name
 ```
 
-The dashboard includes:
-- Connection Manager for WIN_IP and Ollama
-- Sandbox gateway start/stop controls
-- Chat interface to send prompts to the NemoClaw sandbox
-- Hardware monitor with `nvidia-smi` data
-- Quick actions for project analysis, git status, and README generation
+**Test sections:**
 
+| # | Section | What is checked |
+|---|---------|-----------------|
+| 1 | Prerequisites | `credentials.json`, `openshell`, `nemoclaw` in PATH, Podman socket |
+| 2 | Ollama Connectivity | `/api/tags`, model availability, `/api/generate`, `/api/chat` |
+| 3 | OpenShell Gateway | `gateway list` works, `nemoclaw` gateway present |
+| 4 | OpenShell Provider | `ollama-local` registered |
+| 5 | Sandbox | Named sandbox exists in `sandbox list` |
+| 6 | Agent Workflow | If `openclaw` is in PATH: basic response, `uname -s` OS command, credentials audit. If not in PATH (normal when running outside sandbox): falls back to an Ollama `/api/chat` call with a real model prompt as a substitute |
+| 7 | Environment | `DOCKER_HOST` set correctly, socket readable |
+
+Exit code `0` = all pass. Exit code `1` = failures with quick-fix commands printed.
+
+---
+
+## 8. Streamlit Dashboard (nemo_gui.py)
+
+### Features
+
+- **Connection Manager**: configure `WIN_IP` and `OLLAMA_HOST`, live health check
+- **Sandbox & Gateway**: start/stop gateway, start/stop NemoClaw service
+- **Create Sandbox**: register Ollama provider and create sandbox in one click
+- **Agent Chat**: sends prompts **directly to Ollama REST API** — no `openclaw`
+  binary or sandbox connection required
+- **Hardware Monitor**: `nvidia-smi` GPU metrics
+- **OpenShell Control**: list providers, list sandboxes, gateway status
+- **Quick Actions**: project file analysis, git status, README generation
+
+### Chat interface
+
+The chat panel calls `POST /api/chat` (with `/api/generate` fallback) on the
+configured Ollama host. It does **not** require the sandbox to be connected or
+`openclaw` to be in the WSL PATH. As long as Ollama is running on Windows and
+the host IP is correct in the sidebar, the chat works immediately.
+
+### Launching
+
+```bash
+source .venv/bin/activate
+streamlit run nemo_gui.py --server.headless true --server.port 8501
+```
+
+Open `http://127.0.0.1:8501` from a Windows browser. Streamlit runs headless
+in WSL — never try to open the browser from the WSL terminal.
+
+---
+
+## 9. Credentials File
+
+`~/.nemoclaw/credentials.json` is the single source of truth for the Ollama
+endpoint. All scripts read from and write to this file.
+
+```json
+{
+  "provider": "ollama",
+  "ollama": {
+    "host": "http://192.168.29.86:11434",
+    "model": "qwen2.5-coder:14b-instruct-q4_K_M"
+  }
+}
+```
+
+Permissions are set to `600` (owner read/write only).
+
+---
+
+## 10. OpenShell Sandbox Management
+
+```bash
+openshell gateway list          # list running gateways
+openshell provider list         # list registered providers
+openshell sandbox list          # list sandboxes
+
+# Manually register Ollama provider
+openshell provider add \
+  --name ollama-local \
+  --type ollama \
+  --host http://<windows-ip>:11434 \
+  --model qwen2.5-coder:14b-instruct-q4_K_M
+
+# Manually create sandbox
+openshell sandbox create --name nemoclaw-ollama --provider ollama-local
+
+# Connect to sandbox
+nemoclaw nemoclaw-ollama connect
+```
+
+---
+
+## 11. Agent Commands (inside sandbox)
+
+Once connected to the sandbox (`nemoclaw <name> connect`), OpenClaw is
+available and you can run agent commands:
+
+```bash
+openclaw agent --agent main --local \
+  -m "Your prompt here" \
+  --session-id my_session
+```
+
+**Example prompts:**
+
+```bash
+# System info
+openclaw agent --agent main --local -m "Run: uname -a" --session-id s1
+
+# GPU status
+openclaw agent --agent main --local -m "Run: nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader" --session-id s2
+
+# Credentials audit
+openclaw agent --agent main --local -m "Run: cat ~/.nemoclaw/credentials.json" --session-id s3
+
+# Ollama connectivity
+openclaw agent --agent main --local -m "Run: curl -s http://\$(ip route | awk '/default/{print \$3}'):11434/api/tags" --session-id s4
+```
+
+The dashboard **Create Sandbox** button and `simple_onboard.sh` handle provider
+registration and sandbox creation so you can skip directly to `connect`.
+
+---
+
+## 12. Podman as Docker in WSL
+
+The `setup_nemoclaw.sh` script adds this block to `~/.bashrc`:
+
+```bash
+export DOCKER_HOST=unix:///var/run/docker.sock
+alias docker=podman
+
+update_nemoclaw_ip() {
+    local win_ip
+    win_ip=$(ip route | awk '/default/ {print $3; exit}')
+    if [[ -n "$win_ip" && -f "$HOME/.nemoclaw/credentials.json" ]]; then
+        sed -i "s|http://[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+:11434|http://$win_ip:11434|g" \
+            "$HOME/.nemoclaw/credentials.json"
+    fi
+}
+update_nemoclaw_ip
+```
+
+Any Docker-style client in WSL automatically routes to Windows Podman.
+
+---
+
+## 13. Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `docker: Cannot connect to Docker daemon` | Re-run `./setup_nemoclaw.sh`; ensure Podman machine is started in rootful mode |
+| Ollama health check fails | Confirm `OLLAMA_HOST=0.0.0.0` is set on Windows and Ollama is restarted; check firewall rule |
+| Wrong Windows IP detected | Run `./wsl_nemoclaw_autoupdate.sh`; or enter the correct IP manually in the GUI sidebar |
+| Gateway start fails | Run `openshell gateway list` to check for stale gateway, then `openshell gateway destroy --name nemoclaw` |
+| Sandbox creation fails | Ensure gateway is running first with `./start_nemoclaw.sh`, then run `./simple_onboard.sh` |
+| `openclaw: command not found` | Connect to the sandbox first: `nemoclaw nemoclaw-ollama connect` (OpenClaw lives inside the sandbox, not in WSL) |
+| Streamlit won't start | Activate the venv: `source .venv/bin/activate` |
+| Chat returns no response | Check Ollama host in sidebar and click **Check Ollama Health** |
+| GPU not detected | `nvidia-smi` requires CUDA drivers in WSL; GPU metrics degrade gracefully to "unavailable" |
+
+---
+
+## 14. Full Startup Sequence
+
+```bash
+# 1. One-time setup (only needed once or after IP changes)
+./setup_nemoclaw.sh
+
+# 2. Create sandbox (only needed once, or if gateway wasn't running during setup)
+./start_nemoclaw.sh          # start gateway first
+./simple_onboard.sh          # create sandbox
+
+# 3. Verify everything is working
+./test_sandbox.sh
+
+# 4. Every day
+./start_nemoclaw.sh
+source .venv/bin/activate
+streamlit run nemo_gui.py --server.headless true --server.port 8501
+# Open http://127.0.0.1:8501 in Windows browser
+```
+
+---
+
+## 15. Hardware Notes (RTX 5070 Ti / 12GB VRAM)
+
+- The `qwen2.5-coder:14b-instruct-q4_K_M` model uses ~8–10 GB VRAM
+- GPU passthrough is via NVIDIA's WSL2 driver (no separate install needed)
+- Enable Cooler Boost with **Fn + F8** if the laptop exceeds 90 °C
+- Windows may throttle the WSL2 instance at 100 °C, causing request timeouts
+- Monitor with: `nvidia-smi --query-gpu=temperature.gpu,memory.used --format=csv,noheader`
