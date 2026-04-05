@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NemoClaw Local Lab</title>
+    <meta
+      name="description"
+      content="NemoClaw on WSL2 + Podman + Ollama: a local-first, privacy-focused agent lab for rapid iteration without cloud API lock-in."
+    />
+    <meta name="robots" content="index, follow" />
+    <meta
+      name="keywords"
+      content="NemoClaw, OpenClaw, OpenShell, Ollama, WSL2, Podman, local AI, privacy-first AI, self-hosted LLM"
+    />
+    <meta name="theme-color" content="#126b49" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="NemoClaw Local Lab" />
+    <meta property="og:title" content="NemoClaw Local Lab | Local-First Privacy-Focused AI" />
+    <meta
+      property="og:description"
+      content="Run NemoClaw with OpenShell and Ollama on your own hardware. Validate real agent workflows locally, keep data private, and avoid cloud API lock-in."
+    />
+    <meta property="og:image" content="screenshots/image.png" />
+    <meta
+      property="og:image:alt"
+      content="NemoClaw validation output screenshot showing successful local agent tests"
+    />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="NemoClaw Local Lab | Local-First Privacy-Focused AI" />
+    <meta
+      name="twitter:description"
+      content="Build and validate local AI agent workflows with OpenClaw, OpenShell, and Ollama on your own machine."
+    />
+    <meta name="twitter:image" content="screenshots/image.png" />
+    <meta
+      name="twitter:image:alt"
+      content="NemoClaw validation output screenshot showing successful local agent tests"
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <header class="site-header container reveal">
+      <div class="brand-row">
+        <p class="eyebrow">NemoClaw Podman WSL2</p>
+        <a class="repo-link" href="../README.md">View Project README</a>
+      </div>
+      <h1>Build Agents Locally. Keep Your Data Local.</h1>
+      <p class="lead">
+        A practical stack for local-first and privacy-focused users: OpenClaw in
+        sandbox, OpenShell gateway routing, and Ollama on your own Windows GPU box.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="../README.md#7-validation-test-script-testsandboxsh">Read Setup Guide</a>
+        <a class="btn btn-secondary" href="../README.md#real-use-case">Why This Matters</a>
+      </div>
+      <ul class="stats-grid" aria-label="Project highlights">
+        <li>
+          <span class="stat-value">100%</span>
+          <span class="stat-label">Local control over routing and models</span>
+        </li>
+        <li>
+          <span class="stat-value">$0</span>
+          <span class="stat-label">Required cloud LLM spend to get started</span>
+        </li>
+        <li>
+          <span class="stat-value">18/18</span>
+          <span class="stat-label">Validation checks passing in recent run</span>
+        </li>
+      </ul>
+    </header>
+
+    <main>
+      <section class="container section reveal">
+        <h2>Who This Is For</h2>
+        <div class="card-grid three-up">
+          <article class="card">
+            <h3>Local Experimenters</h3>
+            <p>
+              You want to test prompts, workflows, and shell actions quickly on your
+              own laptop without waiting on cloud quotas.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Privacy-Conscious Builders</h3>
+            <p>
+              You prefer to keep code, credentials, and test outputs on your own
+              machine and avoid unnecessary external API exposure.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Cost-Aware Teams</h3>
+            <p>
+              You need a repeatable local lab for demos, prototyping, and CI-like
+              validation without recurring per-token costs.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="container section reveal">
+        <h2>How The Stack Works</h2>
+        <div class="diagram card">
+          <div class="flow-row">
+            <span>WSL2 Tooling</span>
+            <span class="arrow">→</span>
+            <span>OpenShell Gateway</span>
+            <span class="arrow">→</span>
+            <span>Sandbox Proxy Relay</span>
+            <span class="arrow">→</span>
+            <span>Ollama on Windows</span>
+          </div>
+          <p>
+            Section 6 tests use gateway-routed provider configuration so your runtime
+            path matches real OpenShell routing instead of direct fallback calls.
+          </p>
+        </div>
+      </section>
+
+      <section class="container section reveal">
+        <h2>Validation Snapshots</h2>
+        <p class="muted">
+          Real outputs captured from test runs in this repo.
+        </p>
+        <div class="card-grid two-up">
+          <figure class="card shot">
+            <img src="screenshots/image.png" alt="Default suite validation output with passing section 6 tests" loading="lazy" />
+            <figcaption>Default suite output with passing gateway-routed agent checks.</figcaption>
+          </figure>
+          <figure class="card shot">
+            <img src="screenshots/image1.png" alt="Custom prompt validation output showing successful agent response" loading="lazy" />
+            <figcaption>Custom prompt run showing real OpenClaw agent response.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="container section reveal">
+        <h2>Get Running In Minutes</h2>
+        <div class="card">
+          <ol class="steps">
+            <li>Run setup: <code>./setup_nemoclaw.sh</code></li>
+            <li>Start services: <code>./start_nemoclaw.sh</code></li>
+            <li>Validate end-to-end: <code>./test_sandbox.sh</code></li>
+            <li>Try your own prompt: <code>./test_sandbox.sh nemoclaw-main --custom-prompt "what is the system user name"</code></li>
+          </ol>
+          <p class="muted">For complete instructions and troubleshooting, use the project README.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="container site-footer reveal">
+      <p>
+        NemoClaw Local Lab • Built for local-first, privacy-first AI workflows
+      </p>
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>

@@ -1,0 +1,278 @@
+:root {
+  --bg: #f8f5ef;
+  --paper: #fffaf2;
+  --ink: #15231a;
+  --muted: #4b5f53;
+  --line: #d8cfbf;
+  --accent: #126b49;
+  --accent-2: #b78423;
+  --shadow: 0 20px 48px rgba(17, 35, 27, 0.12);
+  --radius: 18px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: "Space Grotesk", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at 5% 0%, #f3e7ce 0%, transparent 36%),
+    radial-gradient(circle at 95% 15%, #d9ebdd 0%, transparent 30%),
+    linear-gradient(180deg, #f6f2ea 0%, #f8f5ef 100%);
+  line-height: 1.5;
+  overflow-x: hidden;
+}
+
+.noise {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.18;
+  background-image: radial-gradient(rgba(0, 0, 0, 0.08) 0.3px, transparent 0.3px);
+  background-size: 3px 3px;
+}
+
+.container {
+  width: min(1080px, calc(100% - 2.2rem));
+  margin: 0 auto;
+}
+
+.site-header {
+  padding: 2.4rem 0 1.2rem;
+}
+
+.brand-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.eyebrow {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.repo-link {
+  font-family: "IBM Plex Mono", monospace;
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  line-height: 1.15;
+}
+
+h1 {
+  margin-top: 0.8rem;
+  font-size: clamp(2rem, 5vw, 4rem);
+  max-width: 12ch;
+}
+
+h2 {
+  font-size: clamp(1.5rem, 3vw, 2.2rem);
+  margin-bottom: 0.8rem;
+}
+
+h3 {
+  font-size: 1.15rem;
+}
+
+.lead {
+  max-width: 62ch;
+  color: var(--muted);
+  font-size: clamp(1rem, 2.2vw, 1.22rem);
+  margin: 1rem 0 0;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin: 1.4rem 0 1.8rem;
+}
+
+.btn {
+  text-decoration: none;
+  font-weight: 700;
+  padding: 0.7rem 1rem;
+  border-radius: 999px;
+  transition: transform 220ms ease, box-shadow 220ms ease;
+}
+
+.btn:hover {
+  transform: translateY(-2px);
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #f9fbf8;
+  box-shadow: 0 10px 24px rgba(18, 107, 73, 0.28);
+}
+
+.btn-secondary {
+  background: #efe6d5;
+  color: var(--ink);
+  border: 1px solid #dbc8aa;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.9rem;
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.stats-grid li {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.95rem;
+  box-shadow: var(--shadow);
+}
+
+.stat-value {
+  display: block;
+  font-size: 1.45rem;
+  font-weight: 700;
+}
+
+.stat-label {
+  display: block;
+  color: var(--muted);
+  margin-top: 0.3rem;
+  font-size: 0.95rem;
+}
+
+.section {
+  padding: 2.4rem 0 0.4rem;
+}
+
+.card-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.three-up {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.two-up {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1rem;
+  box-shadow: var(--shadow);
+}
+
+.card p {
+  margin: 0.5rem 0 0;
+  color: var(--muted);
+}
+
+.diagram .flow-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  align-items: center;
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.95rem;
+}
+
+.arrow {
+  color: var(--accent-2);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.shot {
+  margin: 0;
+}
+
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  border: 1px solid #cdbfaa;
+}
+
+.shot figcaption {
+  margin-top: 0.55rem;
+  color: var(--muted);
+  font-size: 0.94rem;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.steps li {
+  margin: 0.35rem 0;
+}
+
+code {
+  font-family: "IBM Plex Mono", monospace;
+  background: #ece2d0;
+  padding: 0.08rem 0.3rem;
+  border-radius: 6px;
+}
+
+.site-footer {
+  padding: 2.2rem 0 2.8rem;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 650ms ease, transform 650ms ease;
+}
+
+.reveal.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@media (max-width: 900px) {
+  .three-up {
+    grid-template-columns: 1fr;
+  }
+
+  .two-up {
+    grid-template-columns: 1fr;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .site-header {
+    padding-top: 1.4rem;
+  }
+}

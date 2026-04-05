@@ -2,11 +2,14 @@
 # test_sandbox.sh
 # End-to-end test of NemoClaw sandbox + Ollama agent workflow.
 # Runs a series of checks and prints PASS/FAIL for each one.
-# Usage: ./test_sandbox.sh [sandbox-name] [--no-auto-fix]
+# Usage: ./test_sandbox.sh [sandbox-name] [--no-auto-fix] [--custom-prompt "prompt text"]
 #   sandbox-name defaults to "nemoclaw-ollama"
+#   --custom-prompt allows testing with a user-supplied prompt instead of default tests
 
 SANDBOX_NAME="nemoclaw-ollama"
 AUTO_FIX=1
+CUSTOM_PROMPT=""
+CUSTOM_PROMPT_MODE=0
 for arg in "$@"; do
   case "$arg" in
     --no-auto-fix)
@@ -15,8 +18,16 @@ for arg in "$@"; do
     --auto-fix)
       AUTO_FIX=1
       ;;
+    --custom-prompt)
+      CUSTOM_PROMPT_MODE=1
+      ;;
     *)
-      SANDBOX_NAME="$arg"
+      if [[ $CUSTOM_PROMPT_MODE -eq 1 ]]; then
+        CUSTOM_PROMPT="$arg"
+        CUSTOM_PROMPT_MODE=0
+      else
+        SANDBOX_NAME="$arg"
+      fi
       ;;
   esac
 done
@@ -24,6 +35,9 @@ done
 CREDENTIALS_FILE="$HOME/.nemoclaw/credentials.json"
 PASS=0
 FAIL=0
+SANDBOX_OLLAMA_HOST=""
+SANDBOX_OLLAMA_PORT="11434"
+SANDBOX_PROXY_URL="http://10.200.0.1:3128"
 
 # Colours
 GREEN="\033[0;32m"
@@ -36,6 +50,35 @@ fail() { echo -e "${RED}[FAIL]${RESET} $1"; (( FAIL++ )); }
 warn() { echo -e "${YELLOW}[WARN]${RESET} $1"; }
 info() { echo -e "${YELLOW}[INFO]${RESET} $1"; }
 section() { echo ""; echo "── $1 ──────────────────────────"; }
+
+ensure_sandbox_ollama_relay() {
+  # OpenShell sandboxes reach external hosts via enforced HTTP proxy.
+  # Treat that proxy path as the supported relay mode and verify it from
+  # the sandbox before section 6 runs.
+  local tmp_cfg host_alias probe
+  tmp_cfg=$(mktemp)
+  host_alias="openshell-$SANDBOX_NAME"
+
+  if ! openshell sandbox ssh-config "$SANDBOX_NAME" > "$tmp_cfg" 2>/dev/null; then
+    rm -f "$tmp_cfg"
+    warn "Could not fetch sandbox SSH config; proxy-relay preflight skipped."
+    return 1
+  fi
+
+  chmod 600 "$tmp_cfg"
+  probe=$(ssh -o BatchMode=yes -o ConnectTimeout=20 -F "$tmp_cfg" "$host_alias" \
+    "HTTP_PROXY='$SANDBOX_PROXY_URL' HTTPS_PROXY='$SANDBOX_PROXY_URL' ALL_PROXY='$SANDBOX_PROXY_URL' curl -s --max-time 10 'http://$WIN_IP:$SANDBOX_OLLAMA_PORT/api/tags'" 2>/dev/null || true)
+  rm -f "$tmp_cfg"
+
+  if echo "$probe" | grep -q '"models"'; then
+    SANDBOX_OLLAMA_HOST="$WIN_IP"
+    info "Sandbox relay mode: OpenShell proxy ($SANDBOX_PROXY_URL) -> $SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT"
+    return 0
+  fi
+
+  warn "Sandbox could not reach Ollama via OpenShell proxy relay ($SANDBOX_PROXY_URL)."
+  return 1
+}
 
 auto_fix_stack() {
   info "Auto-fix enabled: attempting to remediate gateway/provider/sandbox issues..."
@@ -57,7 +100,7 @@ auto_fix_stack() {
     info "Gateway appears reachable."
   fi
 
-  # 2) Ensure provider exists (OpenAI-compatible provider pointing to Ollama /v1)
+  # 2) Ensure gateway provider exists (used by section 6 gateway-routed runs)
   local provider_output
   provider_output=$(openshell -g nemoclaw provider list 2>&1 || true)
   if ! echo "$provider_output" | grep -q "ollama-local"; then
@@ -66,20 +109,23 @@ auto_fix_stack() {
       --name ollama-local \
       --type openai \
       --credential OPENAI_API_KEY=ollama \
-      --config base_url="http://$WIN_IP:11434/v1" >/dev/null 2>&1; then
+      --config base_url="http://$SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT/v1" >/dev/null 2>&1; then
       info "Provider 'ollama-local' created."
     else
       warn "Provider auto-create failed (may already exist or gateway unavailable)."
     fi
   else
     info "Provider 'ollama-local' already exists."
+    openshell -g nemoclaw provider update ollama-local \
+      --credential OPENAI_API_KEY=ollama \
+      --config base_url="http://$SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT/v1" >/dev/null 2>&1 || true
   fi
 
-  # 3) Set inference route to Ollama provider
-  if openshell -g nemoclaw inference set --provider ollama-local --model "$MODEL" --no-verify >/dev/null 2>&1; then
-    info "Inference route set to provider 'ollama-local' with model '$MODEL'."
+  # 3) Set inference route for the OpenClaw runtime model
+  if openshell -g nemoclaw inference set --provider ollama-local --model "$OPENCLAW_MODEL" --no-verify >/dev/null 2>&1; then
+    info "Inference route set: $OPENCLAW_MODEL → ollama-local."
   else
-    warn "Could not set inference route automatically."
+    warn "Could not set inference route for $OPENCLAW_MODEL."
   fi
 
   # 4) Ensure sandbox exists
@@ -97,6 +143,43 @@ auto_fix_stack() {
   else
     info "Sandbox '$SANDBOX_NAME' already exists."
   fi
+
+  # 5) Ensure sandbox network policy allows egress to the WSL-host relay used for Ollama.
+  # NemoClaw sandboxes are hardened and proxy-restricted; this explicit rule opens only
+  # the Podman bridge listener that forwards to Windows-hosted Ollama.
+  local pol_dump pol_body
+  pol_dump=$(mktemp)
+  pol_body=$(mktemp)
+  if openshell -g nemoclaw policy get "$SANDBOX_NAME" --full > "$pol_dump" 2>/dev/null; then
+    if grep -q "host: $SANDBOX_OLLAMA_HOST" "$pol_dump" && grep -q "port: $SANDBOX_OLLAMA_PORT" "$pol_dump"; then
+      info "Sandbox policy already permits Ollama bridge egress to $SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT."
+    else
+      awk 'f{print} /^---$/{f=1}' "$pol_dump" > "$pol_body"
+      cat >> "$pol_body" <<POLICYEOF
+  ollama_local_bridge:
+    name: ollama_local_bridge
+    endpoints:
+    - host: $SANDBOX_OLLAMA_HOST
+      port: $SANDBOX_OLLAMA_PORT
+      protocol: rest
+      enforcement: enforce
+      access: full
+    binaries:
+    - path: /usr/local/bin/openclaw
+    - path: /usr/bin/node
+    - path: /usr/bin/curl
+    - path: /bin/bash
+POLICYEOF
+      if openshell -g nemoclaw policy set "$SANDBOX_NAME" --policy "$pol_body" --wait --timeout 30 >/dev/null 2>&1; then
+        info "Sandbox policy updated: enabled cross-bridge egress to $SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT."
+      else
+        warn "Could not auto-apply sandbox policy bridge for Ollama."
+      fi
+    fi
+  else
+    warn "Could not read sandbox policy; skipping automatic bridge policy setup."
+  fi
+  rm -f "$pol_dump" "$pol_body"
 }
 
 # Check if a curl response is an Ollama OOM/error response
@@ -238,11 +321,36 @@ if [[ "$AUTO_FIX" -eq 1 ]]; then
   fi
 fi
 
+if ensure_sandbox_ollama_relay; then
+  info "Sandbox Ollama endpoint (proxy-relayed): http://$SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT"
+else
+  SANDBOX_OLLAMA_HOST="$WIN_IP"
+  SANDBOX_OLLAMA_PORT="11434"
+  warn "Falling back to direct sandbox Ollama endpoint: http://$SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT"
+fi
+
 info "Using Ollama host: http://$WIN_IP:11434"
-info "Using model:       $MODEL"
+info "Credentials model: $MODEL"
 
 # 2a. /api/tags reachable
 TAGS_OUTPUT=$(curl -s --max-time 8 "http://$WIN_IP:11434/api/tags" 2>/dev/null || true)
+
+# Use one runtime model for OpenClaw to avoid provider/model conflicts.
+OPENCLAW_MODEL="gemma4:e4b"
+if ! echo "$TAGS_OUTPUT" | python3 -c "
+import json, sys
+try:
+    names = [m.get('name','') for m in json.load(sys.stdin).get('models',[])]
+    sys.exit(0 if any(n.startswith('gemma4:e4b') for n in names) else 1)
+except Exception:
+    sys.exit(1)
+" 2>/dev/null; then
+  fail "Required OpenClaw runtime model 'gemma4:e4b' not found in Ollama"
+  info "Run: ollama pull gemma4:e4b"
+  OPENCLAW_MODEL="gemma4:e4b"
+fi
+info "OpenClaw runtime model: $OPENCLAW_MODEL"
+
 if echo "$TAGS_OUTPUT" | grep -q '"models"'; then
   pass "Ollama /api/tags responded with model list"
 else
@@ -250,27 +358,28 @@ else
   info "Output: $TAGS_OUTPUT"
 fi
 
-# 2b. Configured model is available
+# 2b. OpenClaw runtime model is available
 if echo "$TAGS_OUTPUT" | python3 -c "
 import json, sys
 try:
     data = json.load(sys.stdin)
     names = [m.get('name','') for m in data.get('models',[])]
-    base = '$MODEL'.split(':')[0]
+    base = '$OPENCLAW_MODEL'.split(':')[0]
     found = any(base in n for n in names)
     sys.exit(0 if found else 1)
 except Exception:
     sys.exit(1)
 " 2>/dev/null; then
-  pass "Model '$MODEL' (or base) found in Ollama model list"
+  pass "OpenClaw runtime model '$OPENCLAW_MODEL' found in Ollama model list"
 else
-  fail "Model '$MODEL' not found in Ollama — run: ollama pull $MODEL"
+  fail "Model '$OPENCLAW_MODEL' not found in Ollama — run: ollama pull $OPENCLAW_MODEL"
 fi
 
 # 2c. Simple generate call (quick 1-token test, no stream)
 GENERATE_PAYLOAD=$(python3 -c "
 import json
-print(json.dumps({'model': '$MODEL', 'prompt': 'Reply with only the word HELLO', 'stream': False}))
+print(json.dumps({'model': '$OPENCLAW_MODEL', 'prompt': 'Reply with only the word HELLO', 'stream': False}))
+
 ")
 GENERATE_OUTPUT=$(curl -s --max-time 60 \
   -X POST "http://$WIN_IP:11434/api/generate" \
@@ -303,7 +412,8 @@ fi
 # 2d. Chat endpoint
 CHAT_PAYLOAD=$(python3 -c "
 import json
-print(json.dumps({'model': '$MODEL', 'messages': [{'role':'user','content':'Reply with only the number 42'}], 'stream': False}))
+print(json.dumps({'model': '$OPENCLAW_MODEL', 'messages': [{'role':'user','content':'Reply with only the number 42'}], 'stream': False}))
+
 ")
 CHAT_OUTPUT=$(curl -s --max-time 60 \
   -X POST "http://$WIN_IP:11434/api/chat" \
@@ -415,9 +525,81 @@ run_openclaw_in_sandbox() {
   fi
 
   chmod 600 "$tmp_cfg"
-  ssh -o BatchMode=yes -o ConnectTimeout=25 -F "$tmp_cfg" "$host_alias" bash -s -- "$prompt" "$session_id" <<'EOS'
+  # Gateway-routed path: OpenClaw uses an OpenAI-compatible provider profile
+  # that points at the relay-backed route managed by OpenShell provider config.
+  local sandbox_ollama_host="$SANDBOX_OLLAMA_HOST"
+  local sandbox_ollama_port="$SANDBOX_OLLAMA_PORT"
+  local model="$MODEL"
+  local runtime_model="$OPENCLAW_MODEL"
+  local prompt_q session_q sandbox_ollama_host_q sandbox_ollama_port_q model_q runtime_model_q
+  prompt_q=$(printf '%q' "$prompt")
+  session_q=$(printf '%q' "$session_id")
+  sandbox_ollama_host_q=$(printf '%q' "$sandbox_ollama_host")
+  sandbox_ollama_port_q=$(printf '%q' "$sandbox_ollama_port")
+  model_q=$(printf '%q' "$model")
+  runtime_model_q=$(printf '%q' "$runtime_model")
+  ssh -o BatchMode=yes -o ConnectTimeout=25 -F "$tmp_cfg" "$host_alias" bash -s <<EOS
 set -e
-openclaw agent --agent main --local -m "$1" --session-id "$2"
+
+# Receive arguments from parent shell
+_prompt=$prompt_q
+_session_id=$session_q
+_sandbox_ollama_host=$sandbox_ollama_host_q
+_sandbox_ollama_port=$sandbox_ollama_port_q
+_model=$model_q
+_runtime_model=$runtime_model_q
+
+export NODE_NO_WARNINGS=1
+# Explicit relay mode for sandboxes: use OpenShell proxy to reach Ollama host.
+export HTTP_PROXY="$SANDBOX_PROXY_URL"
+export HTTPS_PROXY="$SANDBOX_PROXY_URL"
+export ALL_PROXY="$SANDBOX_PROXY_URL"
+export http_proxy="$SANDBOX_PROXY_URL"
+export https_proxy="$SANDBOX_PROXY_URL"
+export all_proxy="$SANDBOX_PROXY_URL"
+export NODE_USE_ENV_PROXY=1
+export NO_PROXY="127.0.0.1,localhost,::1"
+export no_proxy="127.0.0.1,localhost,::1"
+
+OLLAMA_TAGS=\$(curl -s --max-time 10 "http://\${_sandbox_ollama_host}:\${_sandbox_ollama_port}/api/tags" 2>/dev/null || true)
+if ! echo "\$OLLAMA_TAGS" | grep -q '"models"'; then
+  echo "[OLLAMA_UNREACHABLE] sandbox could not reach http://\${_sandbox_ollama_host}:\${_sandbox_ollama_port}/api/tags"
+  exit 86
+fi
+
+# Configure OpenClaw gateway-routed provider (OpenAI-compatible API).
+openclaw config set models.providers.gateway "{\"api\":\"openai-completions\",\"apiKey\":\"ollama\",\"baseUrl\":\"http://\${_sandbox_ollama_host}:\${_sandbox_ollama_port}/v1\",\"models\":[{\"id\":\"\${_runtime_model}\",\"name\":\"Gateway Routed \${_runtime_model}\",\"reasoning\":false,\"input\":[\"text\"],\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0},\"contextWindow\":32768,\"maxTokens\":327680}]}" --strict-json >/dev/null 2>&1 || true
+openclaw config set agents.defaults.model.primary "\"gateway/\${_runtime_model}\"" --strict-json >/dev/null 2>&1 || true
+
+# ── Step 1: Set gateway-routed default model ──────────────────────────────────
+openclaw models set "gateway/\${_runtime_model}" 2>/dev/null || true
+
+# ── Step 2: Warm-up selected Ollama model with retry ──────────────────────────
+
+WARMUP_OK=0
+for _try in 1 2 3; do
+  echo "[setup] Warm-up attempt \${_try}/3 for \${_runtime_model} ..."
+  WARMUP_OUT=\$(curl -s --max-time 45 \
+    -X POST "http://\${_sandbox_ollama_host}:\${_sandbox_ollama_port}/api/generate" \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\":\"\${_runtime_model}\",\"prompt\":\"Reply with OK\",\"stream\":false,\"keep_alive\":\"10m\"}" 2>/dev/null || true)
+  if echo "\$WARMUP_OUT" | grep -q '"response"'; then
+    echo "[setup] Warm-up succeeded."
+    WARMUP_OK=1
+    break
+  fi
+  echo "[setup] Warm-up result: \${WARMUP_OUT:0:140}"
+  sleep 2
+done
+
+# ── Step 3: Run the agent ─────────────────────────────────────────────────────
+timeout 180 openclaw agent --agent main --local --timeout 180 -m "\${_prompt}" --session-id "\${_session_id}" 2>&1 || {
+  exit_code=\$?
+  if [[ \$exit_code -eq 124 ]]; then
+    echo "[OPENCLAW_TIMEOUT]"
+  fi
+  exit \$exit_code
+}
 EOS
   local rc=$?
   rm -f "$tmp_cfg"
@@ -455,78 +637,245 @@ fi
 rm -f "$TMP_CFG"
 
 if [[ -n "$OPENCLAW_IN_SANDBOX" ]]; then
-  info "openclaw found inside sandbox at $OPENCLAW_IN_SANDBOX — running live agent tests"
+  # If custom prompt provided, test that directly
+  if [[ -n "$CUSTOM_PROMPT" ]]; then
+    CUSTOM_SESSION_ID="test_custom_$(date +%s)"
+    info "═══════════════════════════════════════════════════════════════"
+    info "CUSTOM PROMPT TEST MODE"
+    info "═══════════════════════════════════════════════════════════════"
+    info "Prompt: '$CUSTOM_PROMPT'"
+    info "Session ID: $CUSTOM_SESSION_ID"
+    info "Sandbox: $SANDBOX_NAME"
+    info "Target Ollama Host: $SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT"
+    info "Target Model: $OPENCLAW_MODEL"
+    info ""
+    info "Gateway-Routed Configuration:"
+    info "  1. gateway provider config → baseUrl http://$SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT/v1"
+    info "  2. openclaw models set gateway/$OPENCLAW_MODEL"
+    info "  3. warm-up model: $OPENCLAW_MODEL"
+    info "  Timeout: 180 seconds"
+    info ""
+    
+    TEST_START=$(date +%s%N)
+    CUSTOM_OUT=$(run_openclaw_in_sandbox "$CUSTOM_PROMPT" "$CUSTOM_SESSION_ID" 2>&1 || true)
+    TEST_END=$(date +%s%N)
+    TEST_DURATION=$((($TEST_END - $TEST_START) / 1000000))
+    
+    info "Execution Time: ${TEST_DURATION}ms"
+    info ""
+    info "Full OpenClaw Agent Output:"
+    echo "┌────────────────────────────────────────────────────────────┐"
+    echo "${CUSTOM_OUT}" | grep -v '^$' | sed 's/^/│ /'
+    echo "└────────────────────────────────────────────────────────────┘"
+    info ""
 
-  # 6a. Basic agent response
-  AGENT_OUT=$(run_openclaw_in_sandbox "Reply with only the word PONG" "test_basic" 2>&1 || true)
-  if echo "$AGENT_OUT" | grep -qi "pong"; then
-    pass "OpenClaw agent responded correctly to basic prompt"
-  elif openclaw_provider_error "$AGENT_OUT"; then
-    warn "OpenClaw provider routing failed for basic test; running shell fallback inside sandbox."
-    FALLBACK_BASIC=$(run_shell_in_sandbox "echo PONG" 2>&1 || true)
-    if echo "$FALLBACK_BASIC" | grep -qi "pong"; then
-      pass "Basic workflow passed via sandbox-shell fallback"
+    if echo "$CUSTOM_OUT" | grep -qi "OLLAMA_UNREACHABLE"; then
+      fail "Custom prompt test failed: sandbox cannot reach Ollama endpoint $SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT"
+    elif echo "$CUSTOM_OUT" | grep -qi "OPENCLAW_TIMEOUT\|LLM request timed out\|No API key found\|FailoverError\|llama runner process has terminated\|Unknown model"; then
+      warn "OpenClaw gateway-routed model execution failed (timeout/auth/model detection)"
+      fail "Custom prompt test failed: OpenClaw could not complete via gateway-routed path"
+    elif [[ -z "$CUSTOM_OUT" ]]; then
+      fail "Custom prompt test: no output from OpenClaw"
+      info "Response: [No output — possible timeout or connection error]"
     else
-      fail "Basic workflow failed (OpenClaw + fallback)"
-      info "Output: ${AGENT_OUT:0:220}"
+      pass "Custom prompt test PASSED: OpenClaw agent responded via Ollama"
+      info "Response received from real OpenClaw agent"
     fi
+    info ""
+    
   else
-    fail "OpenClaw agent did not return expected response"
-    info "Output: ${AGENT_OUT:0:300}"
-  fi
+    # Run default test suite with detailed logging
+    RUN_SESSION_SUFFIX="$(date +%s%N | sha256sum | cut -c1-10)"
+    info "══════════════════════════════════════════════════════════════════════════════════"
+    info "OPENCLAW AGENT WORKFLOW VALIDATION"
+    info "══════════════════════════════════════════════════════════════════════════════════"
+    info "OpenClaw Binary: $OPENCLAW_IN_SANDBOX"
+    info "Sandbox: $SANDBOX_NAME"
+    info "Integration: NemoClaw + OpenShell Gateway Route"
+    info ""
+    info "In-sandbox setup (per-invocation):"
+    info "  1. gateway provider config → baseUrl http://$SANDBOX_OLLAMA_HOST:$SANDBOX_OLLAMA_PORT/v1"
+    info "  2. openclaw models set gateway/$OPENCLAW_MODEL"
+    info "  3. warm-up model: $OPENCLAW_MODEL"
+    info "  4. Timeout: 180 s"
+    info ""
 
-  # 6b. OS command via agent
-  AGENT_OS=$(run_openclaw_in_sandbox "Run the command: uname -s" "test_os" 2>&1 || true)
-  if echo "$AGENT_OS" | grep -qi "linux"; then
-    pass "OpenClaw agent executed OS command and returned 'Linux'"
-  elif openclaw_provider_error "$AGENT_OS"; then
-    warn "OpenClaw provider routing failed for OS test; running shell fallback inside sandbox."
-    FALLBACK_OS=$(run_shell_in_sandbox "uname -s" 2>&1 || true)
-    if echo "$FALLBACK_OS" | grep -qi "linux"; then
-      pass "OS workflow passed via sandbox-shell fallback"
-    else
-      fail "OS workflow failed (OpenClaw + fallback)"
-      info "Output: ${AGENT_OS:0:220}"
-    fi
-  else
-    fail "OpenClaw agent OS command test failed"
-    info "Output: ${AGENT_OS:0:300}"
-  fi
+    # 6a. Basic agent response
+    info "TEST 6a: BASIC PROMPT - Agent Responsiveness"
+    info "─────────────────────────────────────────────"
+    TEST_PROMPT="Reply with only the word PONG"
+    TEST_SESSION="b${RUN_SESSION_SUFFIX}"
+    info "Prompt: '$TEST_PROMPT'"
+    info "Session ID: $TEST_SESSION"
+    info "Validation Criteria: Response must contain 'PONG' (case-insensitive)"
+    info "Description: Tests if OpenClaw agent can respond to a simple request"
+    info ""
+    
+    TEST_START=$(date +%s%N)
+    AGENT_OUT=$(run_openclaw_in_sandbox "$TEST_PROMPT" "$TEST_SESSION" 2>&1 || true)
+    TEST_END=$(date +%s%N)
+    TEST_DURATION=$((($TEST_END - $TEST_START) / 1000000))
 
-  # 6c. Complex command workflow: marker-based multi-step shell check
-  COMPLEX_MARKERS=$(run_openclaw_in_sandbox "Run the command: echo BEGIN_COMPLEX_1 && uname -s && id -u && pwd && echo END_COMPLEX_1" "test_complex_1" 2>&1 || true)
-  if echo "$COMPLEX_MARKERS" | grep -q "BEGIN_COMPLEX_1" && echo "$COMPLEX_MARKERS" | grep -qi "linux" && echo "$COMPLEX_MARKERS" | grep -q "END_COMPLEX_1"; then
-    pass "Complex test 1 passed (multi-step OS command workflow)"
-  elif openclaw_provider_error "$COMPLEX_MARKERS"; then
-    warn "OpenClaw provider routing failed for complex test 1; running shell fallback inside sandbox."
-    FALLBACK_C1=$(run_shell_in_sandbox "echo BEGIN_COMPLEX_1 && uname -s && id -u && pwd && echo END_COMPLEX_1" 2>&1 || true)
-    if echo "$FALLBACK_C1" | grep -q "BEGIN_COMPLEX_1" && echo "$FALLBACK_C1" | grep -qi "linux" && echo "$FALLBACK_C1" | grep -q "END_COMPLEX_1"; then
-      pass "Complex test 1 passed via sandbox-shell fallback"
-    else
-      fail "Complex test 1 failed"
-      info "Output: ${COMPLEX_MARKERS:0:300}"
-    fi
-  else
-    fail "Complex test 1 failed"
-    info "Output: ${COMPLEX_MARKERS:0:400}"
-  fi
+    info "Execution Time: ${TEST_DURATION}ms"
+    info "Response Length: ${#AGENT_OUT} characters"
+    info ""
+    info "Full OpenClaw Agent Output:"
+    echo "┌────────────────────────────────────────────────────────────┐"
+    echo "${AGENT_OUT}" | grep -v '^$' | sed 's/^/│ /'
+    echo "└────────────────────────────────────────────────────────────┘"
+    info ""
 
-  # 6d. Complex data workflow: JSON generation and validation
-  COMPLEX_JSON=$(run_openclaw_in_sandbox "Run the command: python3 -c \"import json,platform,os; print('BEGIN_JSON_2'); print(json.dumps({'os': platform.system(), 'python': platform.python_version(), 'cwd': os.getcwd()})); print('END_JSON_2')\"" "test_complex_2" 2>&1 || true)
-  if echo "$COMPLEX_JSON" | grep -q "BEGIN_JSON_2" && echo "$COMPLEX_JSON" | grep -q '"os": "Linux"' && echo "$COMPLEX_JSON" | grep -q "END_JSON_2"; then
-    pass "Complex test 2 passed (structured JSON workflow)"
-  elif openclaw_provider_error "$COMPLEX_JSON"; then
-    warn "OpenClaw provider routing failed for complex test 2; running shell fallback inside sandbox."
-    FALLBACK_C2=$(run_shell_in_sandbox "python3 -c \"import json,platform,os; print('BEGIN_JSON_2'); print(json.dumps({'os': platform.system(), 'python': platform.python_version(), 'cwd': os.getcwd()})); print('END_JSON_2')\"" 2>&1 || true)
-    if echo "$FALLBACK_C2" | grep -q "BEGIN_JSON_2" && echo "$FALLBACK_C2" | grep -q '"os": "Linux"' && echo "$FALLBACK_C2" | grep -q "END_JSON_2"; then
-      pass "Complex test 2 passed via sandbox-shell fallback"
+    if echo "$AGENT_OUT" | grep -qi "pong"; then
+      pass "✅ Test 6a PASSED: OpenClaw agent responded with 'PONG'"
+      info "Validation: Real OpenClaw agent response contains expected word"
+    elif echo "$AGENT_OUT" | grep -qi "OPENCLAW_TIMEOUT\|LLM request timed out\|No API key found\|FailoverError\|Unknown model"; then
+      warn "⚠️  OpenClaw gateway-routed runtime failed (timeout/auth/model detection)"
+      info "Hint: ensure model '$OPENCLAW_MODEL' is present in Ollama and re-run test"
+      fail "❌ Test 6a FAILED: OpenClaw could not complete via gateway-routed path"
     else
-      fail "Complex test 2 failed"
-      info "Output: ${COMPLEX_JSON:0:300}"
+      fail "❌ Test 6a FAILED: Response does not contain 'PONG'"
     fi
-  else
-    fail "Complex test 2 failed"
-    info "Output: ${COMPLEX_JSON:0:500}"
+    info ""
+
+    # 6b. OS command via agent
+    info "TEST 6b: OS COMMAND EXECUTION - System Integration"
+    info "────────────────────────────────────────────────────"
+    TEST_PROMPT="Run the command: uname -s. Return only the exact command output text. Do not reply with PONG."
+    TEST_SESSION="o${RUN_SESSION_SUFFIX}"
+    info "Prompt: '$TEST_PROMPT'"
+    info "Session ID: $TEST_SESSION"
+    info "Validation Criteria: Response must contain 'Linux' (case-insensitive)"
+    info "Description: Tests if OpenClaw agent can execute OS commands and return results"
+    info ""
+    
+    TEST_START=$(date +%s%N)
+    AGENT_OS=$(run_openclaw_in_sandbox "$TEST_PROMPT" "$TEST_SESSION" 2>&1 || true)
+    TEST_END=$(date +%s%N)
+    TEST_DURATION=$((($TEST_END - $TEST_START) / 1000000))
+
+    info "Execution Time: ${TEST_DURATION}ms"
+    info "Response Length: ${#AGENT_OS} characters"
+    info ""
+    info "Full OpenClaw Agent Output:"
+    echo "┌────────────────────────────────────────────────────────────┐"
+    echo "${AGENT_OS}" | grep -v '^$' | sed 's/^/│ /'
+    echo "└────────────────────────────────────────────────────────────┘"
+    info ""
+
+    if echo "$AGENT_OS" | grep -qi "linux"; then
+      OS_RESULT=$(echo "$AGENT_OS" | grep -oiE "linux|darwin|windows" | head -1)
+      pass "✅ Test 6b PASSED: OpenClaw agent ran 'uname -s' and returned OS=$OS_RESULT"
+      info "Validation: Real OpenClaw agent response contains kernel name"
+    elif echo "$AGENT_OS" | grep -qi "OPENCLAW_TIMEOUT\|LLM request timed out\|No API key found\|FailoverError\|Unknown model"; then
+      warn "⚠️  OpenClaw gateway-routed runtime failed (timeout/auth/model detection)"
+      info "Hint: ensure model '$OPENCLAW_MODEL' is present in Ollama and re-run test"
+      fail "❌ Test 6b FAILED: OpenClaw could not complete via gateway-routed path"
+    else
+      fail "❌ Test 6b FAILED: Response does not contain 'Linux'"
+    fi
+    info ""
+
+    # 6c. Complex command workflow
+    info "TEST 6c: COMPLEX MULTI-STEP WORKFLOW - State Preservation"
+    info "──────────────────────────────────────────────────────────"
+    TEST_PROMPT="Run the command: echo BEGIN_COMPLEX_1 && uname -s && id -u && pwd && echo END_COMPLEX_1. Return the full command output exactly, including all marker lines. Do not reply with PONG."
+    TEST_SESSION="c1${RUN_SESSION_SUFFIX}"
+    info "Prompt: '$TEST_PROMPT'"
+    info "Session ID: $TEST_SESSION"
+    info "Validation Criteria: Response must contain:"
+    info "  1. BEGIN_COMPLEX_1 marker"
+    info "  2. 'Linux' (case-insensitive)"
+    info "  3. END_COMPLEX_1 marker"
+    info "Description: Tests if OpenClaw can preserve state across multiple commands"
+    info ""
+    
+    TEST_START=$(date +%s%N)
+    COMPLEX_MARKERS=$(run_openclaw_in_sandbox "$TEST_PROMPT" "$TEST_SESSION" 2>&1 || true)
+    TEST_END=$(date +%s%N)
+    TEST_DURATION=$((($TEST_END - $TEST_START) / 1000000))
+    
+    info "Execution Time: ${TEST_DURATION}ms"
+    info "Response Length: ${#COMPLEX_MARKERS} characters"
+    info ""
+    
+    info "Full OpenClaw Agent Output:"
+    echo "┌────────────────────────────────────────────────────────────┐"
+    echo "${COMPLEX_MARKERS}" | grep -v '^$' | sed 's/^/│ /'
+    echo "└────────────────────────────────────────────────────────────┘"
+    info ""
+
+    BEGIN_OK=0; OS_OK=0; END_OK=0
+    echo "$COMPLEX_MARKERS" | grep -q "BEGIN_COMPLEX_1" && BEGIN_OK=1
+    echo "$COMPLEX_MARKERS" | grep -qi "linux"          && OS_OK=1
+    echo "$COMPLEX_MARKERS" | grep -q "END_COMPLEX_1"   && END_OK=1
+    info "Marker check — BEGIN_COMPLEX_1: $([ $BEGIN_OK -eq 1 ] && echo 'Found ✓' || echo 'Missing ✗')"
+    info "Marker check — Linux in output: $([ $OS_OK   -eq 1 ] && echo 'Found ✓' || echo 'Missing ✗')"
+    info "Marker check — END_COMPLEX_1:  $([ $END_OK   -eq 1 ] && echo 'Found ✓' || echo 'Missing ✗')"
+
+    if [[ $BEGIN_OK -eq 1 && $OS_OK -eq 1 && $END_OK -eq 1 ]]; then
+      pass "✅ Test 6c PASSED: OpenClaw executed multi-step workflow and returned all markers"
+      info "Validation: Real OpenClaw agent response contains all expected markers"
+    elif echo "$COMPLEX_MARKERS" | grep -qi "OPENCLAW_TIMEOUT\|LLM request timed out\|No API key found\|FailoverError\|Unknown model"; then
+      warn "⚠️  OpenClaw gateway-routed runtime failed (timeout/auth/model detection)"
+      fail "❌ Test 6c FAILED: OpenClaw could not complete via gateway-routed path"
+    else
+      fail "❌ Test 6c FAILED: Response missing one or more required markers"
+    fi
+    info ""
+
+    # 6d. Complex data workflow: JSON generation
+    info "TEST 6d: STRUCTURED DATA WORKFLOW - JSON Generation"
+    info "─────────────────────────────────────────────────────"
+    TEST_PROMPT="Run the command: python3 -c \"import json,platform,os; print('BEGIN_JSON_2'); print(json.dumps({'os': platform.system(), 'python': platform.python_version(), 'cwd': os.getcwd()})); print('END_JSON_2')\". Return the full command output exactly, including BEGIN_JSON_2 and END_JSON_2. Do not reply with PONG."
+    TEST_SESSION="c2${RUN_SESSION_SUFFIX}"
+    info "Prompt: '$TEST_PROMPT'"
+    info "Session ID: $TEST_SESSION"
+    info "Validation Criteria: Response must contain:"
+    info "  1. BEGIN_JSON_2 marker"
+    info "  2. Valid JSON with '\"os\": \"Linux\"'"
+    info "  3. END_JSON_2 marker"
+    info "Description: Tests if OpenClaw can handle structured data and Python code execution"
+    info ""
+    
+    TEST_START=$(date +%s%N)
+    COMPLEX_JSON=$(run_openclaw_in_sandbox "$TEST_PROMPT" "$TEST_SESSION" 2>&1 || true)
+    TEST_END=$(date +%s%N)
+    TEST_DURATION=$((($TEST_END - $TEST_START) / 1000000))
+
+    info "Execution Time: ${TEST_DURATION}ms"
+    info "Response Length: ${#COMPLEX_JSON} characters"
+    info ""
+    info "Full OpenClaw Agent Output:"
+    echo "┌────────────────────────────────────────────────────────────┐"
+    echo "${COMPLEX_JSON}" | grep -v '^$' | sed 's/^/│ /'
+    echo "└────────────────────────────────────────────────────────────┘"
+    info ""
+
+    BJ_OK=0; JO_OK=0; EJ_OK=0
+    echo "$COMPLEX_JSON" | grep -q "BEGIN_JSON_2"      && BJ_OK=1
+    echo "$COMPLEX_JSON" | grep -q '"os": "Linux"'    && JO_OK=1
+    echo "$COMPLEX_JSON" | grep -q "END_JSON_2"        && EJ_OK=1
+    info "Marker check — BEGIN_JSON_2:      $([ $BJ_OK -eq 1 ] && echo 'Found ✓' || echo 'Missing ✗')"
+    info "Marker check — JSON \"os\":\"Linux\": $([ $JO_OK -eq 1 ] && echo 'Found ✓' || echo 'Missing ✗')"
+    info "Marker check — END_JSON_2:        $([ $EJ_OK -eq 1 ] && echo 'Found ✓' || echo 'Missing ✗')"
+
+    if [[ $BJ_OK -eq 1 && $JO_OK -eq 1 && $EJ_OK -eq 1 ]]; then
+      JSON_CONTENT=$(echo "$COMPLEX_JSON" | grep -oE '\{.*"os".*\}' | head -1)
+      pass "✅ Test 6d PASSED: OpenClaw executed Python JSON workflow"
+      info "Parsed JSON from agent: $JSON_CONTENT"
+      info "Validation: Real OpenClaw agent response contains valid structured JSON"
+    elif echo "$COMPLEX_JSON" | grep -qi "OPENCLAW_TIMEOUT\|LLM request timed out\|No API key found\|FailoverError\|Unknown model"; then
+      warn "⚠️  OpenClaw gateway-routed runtime failed (timeout/auth/model detection)"
+      fail "❌ Test 6d FAILED: OpenClaw could not complete via gateway-routed path"
+    else
+      fail "❌ Test 6d FAILED: Response missing markers or valid JSON"
+    fi
+    info ""
+    
+    info "══════════════════════════════════════════════════════════════════════════════════"
+    info "AGENT WORKFLOW VALIDATION COMPLETE"
+    info "══════════════════════════════════════════════════════════════════════════════════"
+    info ""
   fi
 
 else

@@ -3,6 +3,23 @@
 **Target Hardware:** MSI Vector (RTX 5070 Ti / 12GB VRAM)  
 **Environment:** WSL2 Ubuntu · Rootful Podman on Windows · Ollama on Windows
 
+## Real Use Case
+
+This project is designed for a practical local-development scenario:
+
+- You have a Windows gaming laptop with a capable NVIDIA GPU.
+- You want to run agent workflows locally for experimentation and prototyping.
+- You want to avoid recurring cloud LLM API costs while iterating quickly.
+- You want a reproducible setup where gateway, sandbox, model routing, and health checks are scripted.
+
+The stack in this repository gives you a complete local loop:
+
+- Windows hosts Podman (runtime) and Ollama (models).
+- WSL2 hosts NemoClaw/OpenShell tooling and the dashboard.
+- test_sandbox.sh validates end-to-end behavior, including real OpenClaw responses.
+
+In short: this is a cost-controlled, GPU-accelerated local agent lab for daily use on a personal laptop.
+
 ## Architecture
 
 ```
@@ -180,8 +197,10 @@ Runs a full end-to-end test of the stack and prints colour-coded `[PASS]` /
 `[FAIL]` for each check.
 
 ```bash
-./test_sandbox.sh                # tests sandbox "nemoclaw-ollama"
-./test_sandbox.sh my-sandbox     # tests a custom sandbox name
+./test_sandbox.sh                              # tests sandbox "nemoclaw-ollama"
+./test_sandbox.sh my-sandbox                   # tests a custom sandbox name
+./test_sandbox.sh --custom-prompt "Your text"  # test with a custom prompt
+./test_sandbox.sh my-sandbox --custom-prompt "Translate 'hello' to French"  # custom sandbox + prompt
 ```
 
 **Test sections:**
@@ -190,13 +209,126 @@ Runs a full end-to-end test of the stack and prints colour-coded `[PASS]` /
 |---|---------|-----------------|
 | 1 | Prerequisites | `credentials.json`, `openshell`, `nemoclaw` in PATH, Podman socket |
 | 2 | Ollama Connectivity | `/api/tags`, model availability, `/api/generate`, `/api/chat` |
-| 3 | OpenShell Gateway | `gateway list` works, `nemoclaw` gateway present |
+| 3 | OpenShell Gateway | `openshell status` works, `nemoclaw` gateway present |
 | 4 | OpenShell Provider | `ollama-local` registered |
 | 5 | Sandbox | Named sandbox exists in `sandbox list` |
-| 6 | Agent Workflow | If `openclaw` is in PATH: basic response, `uname -s` OS command, credentials audit. If not in PATH (normal when running outside sandbox): falls back to an Ollama `/api/chat` call with a real model prompt as a substitute |
+| 6 | Agent Workflow | OpenClaw agent tests (gateway-routed path): basic response, OS command, complex multi-step workflows, optional custom prompt |
 | 7 | Environment | `DOCKER_HOST` set correctly, socket readable |
 
 Exit code `0` = all pass. Exit code `1` = failures with quick-fix commands printed.
+
+### 7a. Agent Workflow (Gateway-Routed Path)
+
+**New:** Section 6 now uses a gateway-routed OpenClaw provider profile. The
+test script configures a `gateway/*` model route and uses the OpenShell sandbox
+proxy relay path (`10.200.0.1:3128`) to reach the configured Ollama endpoint,
+rather than direct in-sandbox native `ollama/*` calls. This keeps routing
+aligned with OpenShell provider and inference configuration.
+
+- ✅ Section 6 follows OpenShell provider/inference routing
+- ✅ OpenShell proxy relay path with sandbox preflight verification
+- ✅ Clear preflight failure when sandbox cannot reach the configured relay/route
+- ✅ Custom prompts test agent response quality
+
+**Test Cases:**
+
+1. **Basic Prompt**: `Reply with only the word PONG` → validates agent connection
+2. **OS Command**: `Run the command: uname -s` → validates command execution
+3. **Complex Workflow**: Multi-step shell with markers (BEGIN/END) → validates state preservation
+4. **JSON Generation**: Python code generation + JSON output parsing → validates structured responses
+5. **Custom Prompt** (optional): User-supplied prompt for testing specific scenarios
+
+### 7b. Custom Prompts
+
+Test your own agent workflows without modifying the test script:
+
+```bash
+./test_sandbox.sh --custom-prompt "What is 2 + 2?"
+./test_sandbox.sh --custom-prompt "Generate Python code to list files in /tmp"
+./test_sandbox.sh nemoclaw-main --custom-prompt "Translate 'OpenClaw' to German"
+```
+
+When `--custom-prompt` is provided, section 6 runs a single test with your text
+instead of the default 4 tests, and prints the full agent output for inspection.
+
+### 7c. Example Output Snapshots
+
+Below are real examples of successful output patterns captured during validation runs.
+
+Default suite run (highlights):
+
+  [INFO] TEST 6a: BASIC PROMPT - Agent Responsiveness
+  [INFO] Prompt: 'Reply with only the word PONG'
+  ...
+  PONG
+  ...
+  [PASS] ✅ Test 6a PASSED
+
+  [INFO] TEST 6b: OS COMMAND EXECUTION - System Integration
+  [INFO] Prompt: 'Run the command: uname -s. Return only the exact command output text. Do not reply with PONG.'
+  ...
+  Linux
+  ...
+  [PASS] ✅ Test 6b PASSED
+
+  [INFO] TEST 6c: COMPLEX MULTI-STEP WORKFLOW - State Preservation
+  ...
+  BEGIN_COMPLEX_1
+  Linux
+  998
+  /sandbox/.openclaw/workspace
+  END_COMPLEX_1
+  ...
+  [PASS] ✅ Test 6c PASSED
+
+  [INFO] TEST 6d: STRUCTURED DATA WORKFLOW - JSON Generation
+  ...
+  BEGIN_JSON_2
+  {"os": "Linux", "python": "3.12.3", "cwd": "/sandbox/.openclaw/workspace"}
+  END_JSON_2
+  ...
+  [PASS] ✅ Test 6d PASSED
+
+Custom prompt run (example):
+
+  [INFO] CUSTOM PROMPT TEST MODE
+  [INFO] Prompt: 'what is the system user name'
+  ...
+  The system user name is sandbox.
+  ...
+  [PASS] Custom prompt test PASSED: OpenClaw agent responded via Ollama
+
+Screenshot: default suite validation run
+
+![Default suite validation output](docs/screenshots/image.png)
+
+Screenshot: custom prompt validation run
+
+![Custom prompt validation output](docs/screenshots/image1.png)
+
+---
+
+## 8a. GitHub Pages Showcase (docs/)
+
+A modern, privacy-first project showcase page is included at:
+
+- `docs/index.html`
+- `docs/styles.css`
+- `docs/script.js`
+
+It highlights local-first architecture, cost/privacy benefits, and includes
+real validation screenshots from `docs/screenshots/`.
+
+Enable it in GitHub:
+
+1. Open repository **Settings → Pages**
+2. Under **Build and deployment**, set **Source** to **Deploy from a branch**
+3. Select branch **main** (or your default branch) and folder **/docs**
+4. Save and wait for deployment
+
+Your project page will publish to:
+
+`https://<your-github-username>.github.io/<repo-name>/`
 
 ---
 
@@ -254,19 +386,26 @@ Permissions are set to `600` (owner read/write only).
 ## 10. OpenShell Sandbox Management
 
 ```bash
-openshell gateway list          # list running gateways
-openshell provider list         # list registered providers
-openshell sandbox list          # list sandboxes
+openshell status                       # gateway health + endpoint
+openshell -g nemoclaw provider list    # list registered providers
+openshell -g nemoclaw sandbox list     # list sandboxes
+openshell -g nemoclaw inference get    # show active model route
 
 # Manually register Ollama provider
-openshell provider add \
+openshell -g nemoclaw provider create \
   --name ollama-local \
-  --type ollama \
-  --host http://<windows-ip>:11434 \
-  --model qwen2.5-coder:14b-instruct-q4_K_M
+  --type openai \
+  --credential OPENAI_API_KEY=ollama \
+  --config base_url="http://<windows-ip>:11434/v1"
+
+# Keep gateway model routing pinned to the runtime model used by section 6
+openshell -g nemoclaw inference set \
+  --provider ollama-local \
+  --model gemma4:e4b \
+  --no-verify
 
 # Manually create sandbox
-openshell sandbox create --name nemoclaw-ollama --provider ollama-local
+openshell -g nemoclaw sandbox create --name nemoclaw-ollama --provider ollama-local
 
 # Connect to sandbox
 nemoclaw nemoclaw-ollama connect
@@ -285,6 +424,34 @@ openclaw agent --agent main --local \
   --session-id my_session
 ```
 
+**Gateway-Routed Provider Path:**
+
+The `test_sandbox.sh` script configures OpenClaw with a `gateway/*` provider
+profile (OpenAI-compatible API shape) and sets the default model to
+`gateway/<model>` for section 6 runs:
+
+```bash
+openclaw config set models.providers.gateway '{"api":"openai-completions","baseUrl":"http://<relay-host>:<relay-port>/v1","apiKey":"ollama"}'
+openclaw config set agents.defaults.model.primary '"gateway/<model-name>"'
+openclaw models set "gateway/<model-name>"
+openclaw agent --agent main --local -m "Your prompt" --session-id session_1
+```
+
+This keeps section 6 aligned with gateway/provider routing and avoids relying on
+direct in-sandbox native `ollama/*` provider wiring.
+
+For this workspace, the relay path is the OpenShell sandbox proxy. The script
+exports these in-sandbox values before the agent run:
+
+```bash
+HTTP_PROXY=http://10.200.0.1:3128
+HTTPS_PROXY=http://10.200.0.1:3128
+ALL_PROXY=http://10.200.0.1:3128
+```
+
+Section 6 preflights `http://<windows-ip>:11434/api/tags` through that proxy
+before invoking OpenClaw.
+
 **Example prompts:**
 
 ```bash
@@ -298,7 +465,7 @@ openclaw agent --agent main --local -m "Run: nvidia-smi --query-gpu=name,memory.
 openclaw agent --agent main --local -m "Run: cat ~/.nemoclaw/credentials.json" --session-id s3
 
 # Ollama connectivity
-openclaw agent --agent main --local -m "Run: curl -s http://\$(ip route | awk '/default/{print \$3}'):11434/api/tags" --session-id s4
+openclaw agent --agent main --local -m "Run: HTTP_PROXY=http://10.200.0.1:3128 curl -s http://<windows-ip>:11434/api/tags" --session-id s4
 ```
 
 The dashboard **Create Sandbox** button and `simple_onboard.sh` handle provider
@@ -336,9 +503,12 @@ Any Docker-style client in WSL automatically routes to Windows Podman.
 | `docker: Cannot connect to Docker daemon` | Re-run `./setup_nemoclaw.sh`; ensure Podman machine is started in rootful mode |
 | Ollama health check fails | Confirm `OLLAMA_HOST=0.0.0.0` is set on Windows and Ollama is restarted; check firewall rule |
 | Wrong Windows IP detected | Run `./wsl_nemoclaw_autoupdate.sh`; or enter the correct IP manually in the GUI sidebar |
-| Gateway start fails | Run `openshell gateway list` to check for stale gateway, then `openshell gateway destroy --name nemoclaw` |
+| Gateway start fails | Run `openshell status`; if stale, recreate with `openshell gateway start --name nemoclaw --gpu --recreate` |
 | Sandbox creation fails | Ensure gateway is running first with `./start_nemoclaw.sh`, then run `./simple_onboard.sh` |
 | `openclaw: command not found` | Connect to the sandbox first: `nemoclaw nemoclaw-ollama connect` (OpenClaw lives inside the sandbox, not in WSL) |
+| Section 6 prints `[OLLAMA_UNREACHABLE]` | Sandbox cannot reach Ollama through proxy relay. Verify proxy vars in sandbox (`env | grep -i proxy`), then test `curl http://<windows-ip>:11434/api/tags` from sandbox. |
+| OpenClaw reports "No API key found" or "Unknown model" | Section 6 should set `models.providers.gateway` + `gateway/<model>` automatically. Re-run `./test_sandbox.sh --auto-fix` and inspect the full section 6 output block. |
+| Section 6 times out after warmup | Usually model execution latency/host pressure. Confirm warmup succeeds, then retry with lighter prompt or free GPU/RAM on Windows host. |
 | Streamlit won't start | Activate the venv: `source .venv/bin/activate` |
 | Chat returns no response | Check Ollama host in sidebar and click **Check Ollama Health** |
 | GPU not detected | `nvidia-smi` requires CUDA drivers in WSL; GPU metrics degrade gracefully to "unavailable" |
