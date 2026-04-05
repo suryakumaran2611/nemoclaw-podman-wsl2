@@ -18,7 +18,15 @@ sudo rm -f /var/run/docker.sock
 sudo ln -sf "$SOCKET_TARGET" /var/run/docker.sock
 sudo chmod 666 /var/run/docker.sock
 
-WIN_IP=$(ip route | awk '/default/ {print $3; exit}')
+WIN_IP=""
+if command -v powershell.exe >/dev/null 2>&1; then
+  WIN_IP=$(powershell.exe -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notmatch '^(169|127)' } | Select-Object -ExpandProperty IPAddress)" | tr -d '\r' | awk 'NF {print; exit}')
+fi
+
+if [[ -z "$WIN_IP" ]]; then
+  WIN_IP=$(ip route | awk '/default/ {print $3; exit}')
+fi
+
 if [[ -z "$WIN_IP" ]]; then
   echo "❌ Unable to detect Windows host IP from WSL2."
   exit 1

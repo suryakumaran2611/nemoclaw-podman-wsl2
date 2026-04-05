@@ -35,11 +35,13 @@ Use the provided `setup_nemoclaw.sh` to automate the socket bridging and credent
 
 ### setup_nemoclaw.sh
 
-This script fixes the socket, pulls the correct Windows IP, and writes the hidden NemoClaw credentials.
+This script fixes the socket, detects the Windows host IP using PowerShell if available, and writes the hidden NemoClaw credentials.
 
 ```bash
 #!/bin/bash
 # setup_nemoclaw.sh
+
+set -euo pipefail
 
 echo "🚀 Starting NemoClaw Automation for WSL2/Podman..."
 
@@ -50,7 +52,18 @@ sudo ln -s /mnt/wsl/podman-sockets/podman-machine-default/podman-root.sock /var/
 sudo chmod 666 /var/run/docker.sock
 
 # 2. Detect Windows Host IP
-WIN_IP=$(ip route | grep default | awk '{print $3}')
+WIN_IP=""
+if command -v powershell.exe >/dev/null 2>&1; then
+  WIN_IP=$(powershell.exe -NoProfile -Command "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notmatch '^(169|127)' } | Select-Object -ExpandProperty IPAddress)" | tr -d '\r' | awk 'NF {print; exit}')
+fi
+if [[ -z "$WIN_IP" ]]; then
+  WIN_IP=$(ip route | grep default | awk '{print $3}')
+fi
+if [[ -z "$WIN_IP" ]]; then
+  echo "❌ Unable to detect Windows host IP from WSL2."
+  exit 1
+fi
+
 echo "🌐 Detected Windows IP: $WIN_IP"
 
 # 3. Create Credentials (Bypassing 'onboard' bug)
@@ -129,14 +142,16 @@ NemoClaw uses Ollama as a REST provider from Windows. The WSL guest must be able
 
 ### Verify Ollama from WSL
 
-From Ubuntu WSL, confirm connectivity:
+From Ubuntu WSL, confirm connectivity using the current Ollama REST path:
 
 ```bash
 WIN_IP=$(ip route | awk '/default/ {print $3; exit}')
-curl http://$WIN_IP:11434/v1/models
+curl http://$WIN_IP:11434/api/tags
 ```
 
-If this returns a list of models, the network path is working.
+If this returns a JSON object containing `"models"`, the network path is working.
+
+If the default route IP is not reachable, use the dashboard's detected Windows host candidates or copy the actual Windows host IP from PowerShell / `ipconfig` and use that address instead.
 
 ### NemoClaw Ollama credentials
 
@@ -156,7 +171,7 @@ If WSL IP changes, rerun `./wsl_nemoclaw_autoupdate.sh` or reopen a shell after 
 
 ## 7. Streamlit NemoClaw Commander
 
-A single Streamlit dashboard is now the primary GUI for NemoClaw. It can perform all key OpenShell and NemoClaw terminal actions in a WSL2 environment.
+A single Streamlit dashboard is now the primary GUI for NemoClaw. It can perform key NemoClaw and OpenShell sandbox actions in a WSL2 environment.
 
 ### Features
 
@@ -165,9 +180,8 @@ A single Streamlit dashboard is now the primary GUI for NemoClaw. It can perform
 - Sandbox gateway start/stop and status display
 - NemoClaw service start/stop controls
 - Automated full system health check
-- OpenShell provider and sandbox listing
-- Custom OpenShell command execution
-- Interactive chat interface that executes prompts inside the `nemoclaw` sandbox
+- OpenShell sandbox listing and control commands
+- Direct link to the official NemoClaw web UI on the Windows host
 - Hardware monitor with `nvidia-smi` metrics when available
 - Quick Actions for project analysis, git status, and README generation
 
@@ -203,6 +217,7 @@ http://127.0.0.1:8501
 
 - **"Connection refused" errors**: Ensure Podman Machine is running and rootful mode is enabled.
 - **Ollama health check fails**: Verify Windows Ollama is running and firewall allows port 11434.
+- **Windows Web UI not reachable**: Use the detected Windows host IP from the sidebar and open `http://<windows-ip>:18789` in a Windows browser. If the dashboard shows the wrong IP, enter the correct one manually in the sidebar and save the Ollama config.
 - **Browser won't open**: Streamlit runs headless in WSL - always open `http://127.0.0.1:8501` from Windows browser.
 - **Streamlit email prompt**: The config disables this.
 

@@ -4,6 +4,7 @@ import shlex
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse
 
 import streamlit as st
 
@@ -48,11 +49,78 @@ def run_cmd_list(cmd_list, timeout=60):
     return result.returncode, stdout, stderr
 
 
-def get_default_win_ip():
-    rc, out, err = run_cmd("ip route | awk '/default/ {print $3; exit}'")
-    if rc != 0 or not out:
+def run_cmd_no_shell(cmd_list, timeout=60):
+    env = os.environ.copy()
+    env["DOCKER_HOST"] = "unix:///var/run/docker.sock"
+    result = subprocess.run(
+        cmd_list,
+        shell=False,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    return result.returncode, stdout, stderr
+
+
+def parse_host_from_url(host):
+    if not host:
         return ""
-    return out.strip()
+    host = host.strip()
+    if host.startswith("http://") or host.startswith("https://"):
+        parsed = urlparse(host)
+        return parsed.hostname or ""
+    if ":" in host:
+        return host.split(":")[0]
+    return host
+
+
+def get_windows_host_ips():
+    ips = []
+    rc, out, _ = run_cmd("ip route | awk '/default/ {print $3; exit}'")
+    if rc == 0 and out:
+        ips.append(out.strip())
+
+    rc, out, _ = run_cmd_list(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "& { Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notmatch '^(169|127)' } | Select-Object -ExpandProperty IPAddress }",
+        ]
+    )
+    if rc == 0 and out:
+        for line in out.splitlines():
+            ip = line.strip()
+            if ip and ip not in ips:
+                ips.append(ip)
+
+    return ips
+
+
+def find_best_ollama_host():
+    candidates = get_windows_host_ips()
+    for ip in candidates:
+        test_host = f"http://{ip}:11434"
+        healthy, _ = check_ollama_health(test_host)
+        if healthy:
+            return test_host, candidates, f"Detected Ollama at {ip}"
+    return (f"http://{candidates[0]}:11434" if candidates else "", candidates, "No reachable Ollama host detected")
+
+
+def is_ollama_reachable(host_ip):
+    rc, out, _ = run_cmd(f"curl -s --max-time 2 http://{host_ip}:11434/api/tags")
+    return rc == 0 and '"models"' in out
+
+
+def get_default_win_ip():
+    for ip in get_windows_host_ips():
+        if is_ollama_reachable(ip):
+            return ip
+    rc, out, err = run_cmd("ip route | awk '/default/ {print $3; exit}'")
+    return out.strip() if rc == 0 and out else ""
 
 
 def read_config():
@@ -82,34 +150,51 @@ def check_ollama_health(host):
         return False, "Ollama host is empty."
     if not host.startswith("http"):
         host = "http://" + host
-    cmd = f"curl -s --max-time 5 {host}/v1/tags"
-    rc, out, err = run_cmd(cmd)
-    if rc != 0:
-        return False, err or out or "curl failed"
-    try:
-        data = json.loads(out)
-        return True, json.dumps(data, indent=2)
-    except Exception:
-        return True, out
+    paths = ["/api/tags", "/v1/tags", "/v1/models"]
+    for path in paths:
+        cmd = f"curl -s --max-time 5 {host.rstrip('/')}{path}"
+        rc, out, err = run_cmd(cmd)
+        if rc != 0:
+            continue
+        if not out:
+            continue
+        if path.endswith("/api/tags"):
+            try:
+                data = json.loads(out)
+                return True, json.dumps(data, indent=2)
+            except Exception:
+                return False, out
+        if path.endswith("/v1/tags") or path.endswith("/v1/models"):
+            try:
+                data = json.loads(out)
+                return True, json.dumps(data, indent=2)
+            except Exception:
+                return True, out
+    return False, err or out or "curl failed"
 
 
 def gateway_status():
     if not command_exists("openshell"):
         return "unknown", "OpenShell not installed or not in PATH. Install OpenShell in WSL before using gateway commands."
 
-    rc, out, err = run_cmd("openshell gateway list")
+    rc, out, err = run_cmd("openshell gateway info --name nemoclaw")
     if rc == 0:
-        lines = [line for line in out.splitlines() if line.strip()]
-        for line in lines:
-            if "nemoclaw" in line:
-                if "Healthy" in line or "healthy" in line:
-                    return "running", line.strip()
-                return "stopped", line.strip()
-        return "stopped", "Named gateway not found"
+        return "running", out.strip() or "Gateway is running"
 
     err_text = err.strip() or out.strip() or "Failed to query gateway status"
-    if "unrecognized subcommand 'list'" in err_text or "unrecognized command 'list'" in err_text:
-        return "unknown", "Gateway list unsupported by this OpenShell version. Use the Start Gateway button or update OpenShell."
+    if "unrecognized subcommand 'info'" in err_text or "unrecognized command 'info'" in err_text:
+        rc, out, err = run_cmd("openshell gateway list")
+        if rc == 0:
+            lines = [line for line in out.splitlines() if line.strip()]
+            for line in lines:
+                if "nemoclaw" in line:
+                    if "Healthy" in line or "healthy" in line:
+                        return "running", line.strip()
+                    return "stopped", line.strip()
+            return "stopped", "Named gateway not found"
+        err_text = err.strip() or out.strip() or "Failed to query gateway status"
+        if "unrecognized subcommand 'list'" in err_text or "unrecognized command 'list'" in err_text:
+            return "unknown", "Gateway list unsupported by this OpenShell version. Use the Start Gateway button or update OpenShell."
 
     return "unknown", err_text
 
@@ -128,22 +213,38 @@ def detect_exec_support():
 
 
 def run_system_health(win_ip, host):
-    checks = {}
-    checks["gateway"], checks["gateway_msg"] = gateway_status()
-    healthy, message = check_ollama_health(host)
-    checks["ollama"] = "ok" if healthy else "fail"
-    checks["ollama_msg"] = message
-    rc, out, err = list_providers()
-    checks["providers"] = "ok" if rc == 0 else "fail"
-    checks["providers_msg"] = out or err
-    rc, out, err = list_sandboxes()
-    checks["sandboxes"] = "ok" if rc == 0 else "fail"
-    checks["sandboxes_msg"] = out or err
-    healthy, gpu_data = query_nvidia()
-    checks["gpu"] = "ok" if healthy else "warn"
-    checks["gpu_msg"] = gpu_data
-    checks["exec_support"], checks["exec_msg"] = detect_exec_support()
-    return checks
+    try:
+        checks = {}
+        checks["gateway"], checks["gateway_msg"] = gateway_status()
+        healthy, message = check_ollama_health(host)
+        checks["ollama"] = "ok" if healthy else "fail"
+        checks["ollama_msg"] = message
+        rc, out, err = list_providers()
+        checks["providers"] = "ok" if rc == 0 else "fail"
+        checks["providers_msg"] = out or err
+        rc, out, err = list_sandboxes()
+        checks["sandboxes"] = "ok" if rc == 0 else "fail"
+        checks["sandboxes_msg"] = out or err
+        healthy, gpu_data = query_nvidia()
+        checks["gpu"] = "ok" if healthy else "warn"
+        checks["gpu_msg"] = gpu_data
+        checks["exec_support"], checks["exec_msg"] = detect_exec_support()
+        return checks
+    except Exception as e:
+        return {
+            "gateway": "error",
+            "gateway_msg": f"Exception during health check: {str(e)}",
+            "ollama": "error",
+            "ollama_msg": f"Exception during health check: {str(e)}",
+            "providers": "error",
+            "providers_msg": f"Exception during health check: {str(e)}",
+            "sandboxes": "error",
+            "sandboxes_msg": f"Exception during health check: {str(e)}",
+            "gpu": "error",
+            "gpu_msg": f"Exception during health check: {str(e)}",
+            "exec_support": False,
+            "exec_msg": f"Exception during health check: {str(e)}",
+        }
 
 
 def list_providers():
@@ -203,11 +304,8 @@ def run_start_sequence():
 def run_chat(prompt):
     if not prompt:
         return 1, "", "Prompt is empty"
-    if not command_exists("openshell"):
-        return 127, "", "OpenShell not installed or not in PATH."
-
-    command = ["openshell", "exec", "--name", "nemoclaw", "agent", "-m", prompt]
-    return run_cmd_list(command, timeout=120)
+    # Since OpenShell exec is not supported, return a message to use the official UI
+    return 0, "", "OpenShell exec is not supported. Use the 'Open Official Web UI' button to access the agent chat interface."
 
 
 def query_nvidia():
@@ -262,9 +360,16 @@ st.session_state.setdefault("startup_check", None)
 
 config = read_config() or {}
 ollama_config = config.get("ollama", {})
-default_win_ip = get_default_win_ip()
-default_host = ollama_config.get("host") or f"http://{default_win_ip}:11434"
-default_model = ollama_config.get("model") or "qwen2.5-coder:14b-instruct-q4_K_M"
+best_host, host_candidates, host_message = find_best_ollama_host()
+saved_host = ollama_config.get("host")
+if saved_host:
+    saved_ok, _ = check_ollama_health(saved_host)
+    default_host = saved_host if saved_ok else best_host or saved_host
+else:
+    default_host = best_host
+
+default_model = ollama_config.get("model") or "gemma4:e4b"
+default_win_ip = parse_host_from_url(default_host)
 
 openshell_available = command_exists("openshell")
 nemo_available = command_exists("nemoclaw")
@@ -298,11 +403,12 @@ with st.sidebar:
 
     win_ip = st.text_input("Windows Host IP", value=default_win_ip)
     ollama_host = st.text_input("OLLAMA_HOST", value=default_host)
-    model = st.selectbox(
-        "Ollama Model",
-        ["qwen2.5-coder:14b-instruct-q4_K_M", "gemma4:e4b"],
-        index=0 if default_model.startswith("qwen2.5") else 1,
-    )
+    model_options = ["gemma4:e4b", "qwen2.5-coder:14b-instruct-q4_K_M"]
+    model_index = model_options.index(default_model) if default_model in model_options else 0
+    model = st.selectbox("Ollama Model", model_options, index=model_index)
+    if host_candidates:
+        st.markdown(f"**Detected Windows host candidates:** {', '.join(host_candidates)}")
+        st.markdown(f"**Recommended Ollama host:** {best_host or 'none detected'}")
     if st.button("Save Ollama Config"):
         payload = write_config(ollama_host, model)
         st.success("Saved NemoClaw credentials.json")
@@ -345,6 +451,17 @@ with st.sidebar:
         else:
             st.error("Gateway stop failed")
 
+    ui_host = parse_host_from_url(ollama_host) or win_ip
+    ui_url = f"http://{ui_host}:18789" if ui_host else ""
+    if ui_url:
+        st.markdown(
+            f'<a href="{ui_url}" target="_blank" style="display:inline-block;padding:0.55rem 0.9rem;background:#4F8AFF;color:#ffffff;border-radius:0.4rem;text-decoration:none;font-weight:600;">Open Official NemoClaw Web UI</a>',
+            unsafe_allow_html=True,
+        )
+        st.info(f"Open this URL from Windows: {ui_url}")
+    else:
+        st.warning("Unable to detect a Windows host IP. Enter it manually above.")
+
     if st.button("Start NemoClaw Service"):
         rc, out, err = run_nemoclaw_start()
         st.session_state.last_output = out or err
@@ -383,7 +500,7 @@ with st.sidebar:
     if st.button("Run Full System Check"):
         st.session_state.system_check = run_system_health(win_ip, ollama_host)
 
-    if "system_check" in st.session_state:
+    if st.session_state.system_check is not None:
         check = st.session_state.system_check
         st.write("**Gateway:**", check["gateway"], check["gateway_msg"])
         st.write("**Ollama:**", check["ollama"], check["ollama_msg"])
@@ -431,7 +548,7 @@ with cols[0]:
         st.success("OpenShell exec is available for agent commands.")
     else:
         st.warning("OpenShell exec is unavailable: " + exec_msg)
-        st.info("If your version of OpenShell does not support exec, run commands from openshell term or update OpenShell.")
+        st.info("Use the 'Open Official Web UI' button in the sidebar to access the agent chat interface.")
 
     examples = {
         "Todo App Builder (agent)": ("agent", "Create a complete Todo app in Python using Streamlit. Include full code for app.py, requirements.txt, and one example task."),
@@ -454,16 +571,9 @@ with cols[0]:
     prompt = st.text_input("Send a command to NemoClaw", key="prompt")
     if st.button("Send to Agent"):
         if prompt:
-            if exec_supported:
-                st.session_state.messages.append({"role": "user", "content": prompt})
-                rc, out, err = run_chat(prompt)
-                if rc == 0:
-                    st.session_state.messages.append({"role": "assistant", "content": out})
-                else:
-                    st.session_state.messages.append({"role": "assistant", "content": err or out})
-            else:
-                st.error("Cannot send agent prompts because OpenShell exec is not supported.")
-                st.session_state.messages.append({"role": "assistant", "content": "OpenShell exec unsupported - use openshell term or update your OpenShell CLI."})
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            rc, out, err = run_chat(prompt)
+            st.session_state.messages.append({"role": "assistant", "content": out or err or "Command executed"})
 
     for message in st.session_state.messages:
         if message["role"] == "user":
